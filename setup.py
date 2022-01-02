@@ -21,7 +21,7 @@ with readme_path.open('r') as readme_file:
 # Define version
 init_path = Path(cwd, './tickle/__init__.py')
 with init_path.open('r') as init_file:
-    VERSION = init_file.readline().split(' = ')[1][1:-1]
+    VERSION = init_file.readline().split(' = ')[1][1:-2]
 
 # Upload command
 class UploadCommand(Command):
