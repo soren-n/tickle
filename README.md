@@ -34,32 +34,35 @@ The pip install above will also install the following project dependencies:
 
 # Usage
 ```
-usage: tickle [-h] [-v {DEBUG,INFO}] [-a AGENDA] [-d DEPEND] [-c CACHE] [-l LOG] {static,dynamic,clean}
+usage: tickle [-h] [-v {DEBUG,INFO}] [-a AGENDA] [-d DEPEND] [-c CACHE] [-l LOG]
+              {static,dynamic,clean}
 
 Task graph scheduling with asynchronous evaluation.
 
 positional arguments:
   {static,dynamic,clean}
-                        static for an inattentive evaluation mode where file modifications are ignored once tasks have been
-                        scheduled, dynamic for an attentive evaluation mode where file creations or modifications trigger a
-                        rescheduling of the task graph; clean mode will delete all files and folders generated during static or
-                        dynamic evaluation
+                        static for an inattentive evaluation mode where file modifications are
+                        ignored once tasks have been scheduled, dynamic for an attentive evaluation
+                        mode where file creations or modifications trigger a rescheduling of the
+                        task graph; clean mode will delete all files and folders generated during
+                        static or dynamic evaluation
 
 optional arguments:
   -h, --help            show this help message and exit
   -v {DEBUG,INFO}, --verbosity {DEBUG,INFO}
                         Verbosity level of process message logging (default: INFO)
   -a AGENDA, --agenda AGENDA
-                        Agenda YAML file location; contains the procedure and task definitions, file path must be relative to current
-                        working directory (default: ./agenda.yaml)
+                        Agenda YAML file location; contains the procedure and task definitions, file
+                        path must be relative to current working directory (default: ./agenda.yaml)
   -d DEPEND, --depend DEPEND
-                        Depend YAML file location; contains a map of dynamic task dependencies, this file is optional, file path must
-                        be relative to current working directory (default: ./depend.yaml)
+                        Depend YAML file location; contains a map of dynamic task dependencies, this
+                        file is optional, file path must be relative to current working directory
+                        (default: ./depend.yaml)
   -c CACHE, --cache CACHE
-                        Binary cache file location; contains inter-run persistent data, file path must be relative to current working
-                        directory (default: ./cache.bin)
-  -l LOG, --log LOG     Log file location; contains runtime messages, file path must be relative to current working directory
-                        (default: ./tickle.log)
+                        Binary cache file location; contains inter-run persistent data, file path
+                        must be relative to current working directory (default: ./cache.bin)
+  -l LOG, --log LOG     Log file location; contains runtime messages, file path must be relative to
+                        current working directory (default: ./tickle.log)
 ```
 If you stick to the default paths and file names, then running tickle should be as simple as:
 ```
