@@ -1,5 +1,5 @@
 # tickle
-A command line workflow automation tool which performs task graph scheduling and concurrent evaluation.
+A command line workflow automation tool which performs task graph scheduling and concurrent task evaluation.
 
 Think of tickle as a generalised version of [ninja](https://github.com/ninja-build/ninja), i.e. not just for compiling native code projects, but for arbitrary concurrent evaluation of command line tasks. Tickle was initially conceived as a general backend for build systems, but can be used as a backend for any system that needs to schedule and evaluate command line tasks that produce and consume files concurrently.
 

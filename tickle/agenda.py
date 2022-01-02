@@ -5,7 +5,7 @@ from pathlib import Path
 import yaml
 
 # Internal module dependencies
-import dataspec
+from . import dataspec
 
 ###############################################################################
 # Types

@@ -8,12 +8,12 @@ import logging
 import os
 
 # Internal module dependencies
-from evaluate import Task, TaskError, Evaluator
-from watch import Event, FileWatcher
-from cache import Cache
-import agenda
-import depend
-import graph
+from .evaluate import Task, TaskError, Evaluator
+from .watch import Event, FileWatcher
+from .cache import Cache
+from . import agenda
+from . import depend
+from . import graph
 
 ###############################################################################
 # Logging helpers
@@ -613,7 +613,7 @@ def main(args):
     if args.mode == 'clean':
         return _clean(cache_path)
 
-if __name__ == '__main__':
+def cli():
     import sys
     import argparse
 

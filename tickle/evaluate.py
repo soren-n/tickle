@@ -7,7 +7,7 @@ import logging
 import signal
 
 # Internal module dependencies
-from util import SingleWriteMultipleReadLock
+from .util import SingleWriteMultipleReadLock
 
 ###############################################################################
 # Exceptions
