@@ -5,6 +5,17 @@ Think of tickle as a generalised version of [ninja](https://github.com/ninja-bui
 
 Tickle takes as input a description of tasks to be performed and their dependencies; this is in the form of two files: _agenda_ and _depend_. It then compiles an evaluation schedule for these tasks; checking their input and output files for changes against a persistent cache, as well as checking status of task dependencies. I.e. only tasks that need to be re/evaluated will be scheduled.
 
+# Install
+Tickle is currently only supported for Python >=3.9, although it might work with older versions. It is distributed with pip and can be installed with the following command:
+```
+$ python3 -m pip install tickle-soren-n
+```
+
+The pip install above will also install the following project dependencies:
+
+- [PyYAML](https://github.com/yaml/pyyaml)
+- [Watchdog](https://github.com/gorakhargosh/watchdog)
+
 # Modes
 Tickle has three modes:
 
@@ -20,17 +31,6 @@ The clean mode will only delete generated folders if they are empty after genera
 Tickle assumes that it has full control over the input and output files described in the agenda. The only files that tickle supports modification to during runtime are: the agenda file, the depend file and the initial input files.
 
 As such if you need to interface/overlap tickle with other systems in a workflow, it is safest that you do so modally; i.e. before tickle is run, and after it has terminated. However it should be safe to overlap your system's runtime with tickle's, iff your system only reads the generated files.
-
-# Install
-Tickle is currently only supported for Python >=3.9, although it might work with older versions. It is distributed with pip and can be installed with the following command:
-```
-$ python3 -m pip install tickle-soren-n
-```
-
-The pip install above will also install the following project dependencies:
-
-- [PyYAML](https://github.com/yaml/pyyaml)
-- [Watchdog](https://github.com/gorakhargosh/watchdog)
 
 # Usage
 ```
