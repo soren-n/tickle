@@ -4,9 +4,12 @@ import sys
 import os
 
 # Project metadata
-NAME = 'tickle-workflow'
+NAME = 'tickle-soren-n'
 DESCRIPTION = 'A command line workflow automation tool which performs task graph scheduling and concurrent task evaluation.'
 URL = 'https://github.com/soren-n/tickle'
+OTHER_URL = {
+    "Bug Tracker": 'https://github.com/soren-n/tickle/issues',
+}
 EMAIL = 'sorennorbaek@gmail.com'
 AUTHOR = 'Soren Norbaek'
 REQUIRES_PYTHON = '>=3.9.0'
@@ -15,12 +18,12 @@ REQUIRED = ['pyyaml', 'watchdog']
 # Define long description
 cwd = Path(__file__).parent
 readme_path = Path(cwd, 'README.md')
-with readme_path.open('r') as readme_file:
+with readme_path.open('r', encoding = 'utf-8') as readme_file:
     LONG_DESCRIPTION = '\n%s' % readme_file.read()
 
 # Define version
 init_path = Path(cwd, './tickle/__init__.py')
-with init_path.open('r') as init_file:
+with init_path.open('r', encoding = 'utf-8') as init_file:
     VERSION = init_file.readline().split(' = ')[1][1:-2]
 
 # Upload command
@@ -63,7 +66,6 @@ setup(
     requires_python = REQUIRES_PYTHON,
     install_requires = REQUIRED,
     packages = find_packages(exclude = ["tests", "examples"]),
-    include_package_data = True,
     entry_points = {
         'console_scripts': ['tickle=tickle.main:cli'],
     },
