@@ -22,7 +22,7 @@ Tickle assumes that it has full control over the input and output files describe
 As such if you need to interface/overlap tickle with other systems in a workflow, it is safest that you do so modally; i.e. before tickle is run, and after it has terminated. However it should be safe to overlap your system's runtime with tickle's, iff your system only reads the generated files.
 
 # Install
-Tickle is currently only implemented in Python 3.9. It is distributed with pip and can be installed with the following command:
+Tickle is currently only supported for Python >=3.9, although it might work with older versions. It is distributed with pip and can be installed with the following command:
 ```
 $ python3 -m pip install tickle
 ```
@@ -34,23 +34,23 @@ The pip install above will also install the following project dependencies:
 
 # Usage
 ```
-usage: tickle [-h] [-v {DEBUG,INFO}] [-a AGENDA] [-d DEPEND] [-c CACHE] [-l LOG]
-              {static,dynamic,clean}
+usage: tickle [-h] [--debug] [-a AGENDA] [-d DEPEND] [-c CACHE] [-l LOG]
+              {static,dynamic,clean,version}
 
 Task graph scheduling with asynchronous evaluation.
 
 positional arguments:
-  {static,dynamic,clean}
+  {static,dynamic,clean,version}
                         static for an inattentive evaluation mode where file modifications are
                         ignored once tasks have been scheduled, dynamic for an attentive
                         evaluation mode where file creations or modifications trigger a
                         rescheduling of the task graph; clean mode will delete all files and
-                        folders generated during static or dynamic evaluation
+                        folders generated during static or dynamic evaluation; version mode will
+                        print the tool version
 
 optional arguments:
   -h, --help            show this help message and exit
-  -v {DEBUG,INFO}, --verbosity {DEBUG,INFO}
-                        Verbosity level of process message logging (default: INFO)
+  --debug               Sets debug logging level for tool messages (default: False)
   -a AGENDA, --agenda AGENDA
                         Agenda YAML file location; contains the procedure and task definitions,
                         file path must be relative to current working directory (default:

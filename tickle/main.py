@@ -585,6 +585,12 @@ def _clean(cache_path):
 ###############################################################################
 def main(args):
 
+    # Check if in version mode
+    if args.mode == 'version':
+        from . import __version__
+        print(__version__)
+        return True
+
     # Check agenda file path
     agenda_path = Path(cwd, args.agenda)
     if not agenda_path.exists() and not agenda_path.is_file():
@@ -601,7 +607,7 @@ def main(args):
     logging.basicConfig(
         filename = args.log,
         encoding = 'utf-8',
-        level = args.verbosity,
+        level = 'DEBUG' if args.debug else 'INFO',
         format = '%(asctime)s | %(levelname)s | %(message)s'
     )
 
@@ -624,16 +630,14 @@ def cli():
     )
     parser.add_argument(
         'mode', type = str,
-        choices = ['static', 'dynamic', 'clean'],
-        help = 'static for an inattentive evaluation mode where file modifications are ignored once tasks have been scheduled, dynamic for an attentive evaluation mode where file creations or modifications trigger a rescheduling of the task graph; clean mode will delete all files and folders generated during static or dynamic evaluation'
+        choices = ['static', 'dynamic', 'clean', 'version'],
+        help = 'static for an inattentive evaluation mode where file modifications are ignored once tasks have been scheduled, dynamic for an attentive evaluation mode where file creations or modifications trigger a rescheduling of the task graph; clean mode will delete all files and folders generated during static or dynamic evaluation; version mode will print the tool version'
     )
     parser.add_argument(
-        '-v', '--verbosity',
-        type = str,
-        dest = 'verbosity',
-        choices = ['DEBUG', 'INFO'],
-        default = 'INFO',
-        help = 'Verbosity level of process message logging'
+        '--debug',
+        dest = 'debug',
+        action = 'store_true',
+        help = 'Sets debug logging level for tool messages'
     )
     parser.add_argument(
         '-a', '--agenda',

@@ -5,7 +5,6 @@ import os
 
 # Project metadata
 NAME = 'tickle'
-VERSION = '0.0.1'
 DESCRIPTION = 'A command line workflow automation tool which performs task graph scheduling and concurrent task evaluation.'
 URL = 'https://github.com/soren-n/tickle'
 EMAIL = 'sorennorbaek@gmail.com'
@@ -16,8 +15,13 @@ REQUIRED = ['pyyaml', 'watchdog']
 # Define long description
 cwd = Path(__file__).parent
 readme_path = Path(cwd, 'README.md')
-with readme_path.open('r') as readme:
-    LONG_DESCRIPTION = '\n%s' % readme.read()
+with readme_path.open('r') as readme_file:
+    LONG_DESCRIPTION = '\n%s' % readme_file.read()
+
+# Define version
+init_path = Path(cwd, './tickle/__init__.py')
+with init_path.open('r') as init_file:
+    VERSION = init_file.readline().split(' = ')[1][1:-1]
 
 # Upload command
 class UploadCommand(Command):
