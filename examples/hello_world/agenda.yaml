@@ -1,0 +1,44 @@
+procs:
+  compile_cpp:
+    - g++
+    - -c
+    - $src
+    - -o
+    - $dst
+  link_exe:
+    - g++
+    - $objs
+    - -o
+    - $exe
+tasks:
+  - desc: Compiling src/greet.cpp
+    proc: compile_cpp
+    args:
+      src: [ src/greet.cpp ]
+      dst: [ obj/greet.o ]
+    inputs:
+      - src/greet.cpp
+    outputs:
+      - obj/greet.o
+  - desc: Compiling src/main.cpp
+    proc: compile_cpp
+    args:
+      src: [ src/main.cpp ]
+      dst: [ obj/main.o ]
+    inputs:
+      - src/main.cpp
+    outputs:
+      - obj/main.o
+  - desc: Linking exe/hello_world
+    proc: link_exe
+    args:
+      objs:
+        - obj/greet.o
+        - obj/main.o
+      exe:
+        - exe/hello_world
+    inputs:
+      - obj/greet.o
+      - obj/main.o
+    outputs:
+      - exe/hello_world
