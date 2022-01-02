@@ -11,7 +11,7 @@ procs:
     - -o
     - $exe
 tasks:
-  - desc: Compiling src/greet.cpp
+  - desc: Compiling ./src/greet.cpp
     proc: compile_cpp
     args:
       src: [ src/greet.cpp ]
@@ -20,7 +20,7 @@ tasks:
       - src/greet.cpp
     outputs:
       - obj/greet.o
-  - desc: Compiling src/main.cpp
+  - desc: Compiling ./src/main.cpp
     proc: compile_cpp
     args:
       src: [ src/main.cpp ]
@@ -29,7 +29,7 @@ tasks:
       - src/main.cpp
     outputs:
       - obj/main.o
-  - desc: Linking exe/hello_world
+  - desc: Linking ./exe/hello_world
     proc: link_exe
     args:
       objs:
