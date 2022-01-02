@@ -40,8 +40,13 @@ def _cwd_relative(path):
     if not _path.startswith(cwd): return path
     return Path('.%s' % _path[len(cwd):])
 
-def _hash(file_path):
+def _hash_wait(file_path):
     while not file_path.exists(): sleep(0)
+    with file_path.open('rb') as file:
+        return hashlib.md5(file.read()).hexdigest()
+
+def _hash(file_path):
+    if not file_path.exists(): return
     with file_path.open('rb') as file:
         return hashlib.md5(file.read()).hexdigest()
 
@@ -80,7 +85,7 @@ def _make_graph(agenda_data, cache):
 
         # Update cached hashes
         cache[task_name].update({
-            str(input) : _hash(input)
+            str(input) : _hash_wait(input)
             for input in task_data.inputs
         })
         cache['files'] = set.union(cache['files'], {
@@ -225,9 +230,6 @@ def _update_depend(
 
 def _make_schedule(tasks, agenda_data, depend_closures, cache):
 
-    def __hash(file_path):
-        return _hash(file_path) if file_path.exists() else None
-
     # Clear graph progress and prepare cache
     if 'files' not in cache: cache['files'] = set()
     if 'folders' not in cache: cache['folders'] = set()
@@ -255,12 +257,12 @@ def _make_schedule(tasks, agenda_data, depend_closures, cache):
             for file_path in prev_closure.difference(curr_closure):
                 del prev_hashes[file_path]
             for file_path in curr_closure.difference(prev_closure):
-                prev_hashes[file_path] = __hash(Path(file_path))
+                prev_hashes[file_path] = _hash(Path(file_path))
             continue
 
         # Check for file changes
         curr_hashes = {
-            file_path : __hash(Path(file_path))
+            file_path : _hash(Path(file_path))
             for file_path in curr_closure
         }
         diff_hashes = {
@@ -311,20 +313,24 @@ class StaticEvaluator(Evaluator):
         self._tasks.append(terminate_task)
 
         # Initial load of depend
-        self._on_depend()
+        self._depend_hash = _hash(self._depend_path)
+        self._update_depend()
 
         # Dynamic reload of depend
-        self._watcher.subscribe(depend_path, self._load_depend)
+        self._watcher.subscribe(depend_path, self._event_depend)
 
-    def _load_depend(self, event):
+    def _event_depend(self, event):
+        depend_hash = _hash(self._depend_path)
+        if self._depend_hash == depend_hash: return
+        self._depend_hash = depend_hash
         _msg('./%s was modified, rescheduling' % (
             _cwd_relative(self._depend_path)
         ))
         self.pause()
-        self._on_depend()
+        self._update_depend()
         self.resume()
 
-    def _on_depend(self):
+    def _update_depend(self):
         depend_data = (
             depend.load(self._depend_path)
             if self._depend_path.exists() else {}
@@ -387,60 +393,77 @@ class DynamicEvaluator(Evaluator):
         self._explicits = set()
         self._implicits = set()
         self._closures = dict()
-        self._on_agenda()
+        self._agenda_hash = _hash(agenda_path)
+        self._depend_hash = _hash(depend_path)
+        self._source_hashes = dict()
+        self._update_agenda()
 
         # Setup file watching
-        self._watcher.subscribe(agenda_path, self._reload_agenda)
-        self._watcher.subscribe(depend_path, self._reload_depend)
+        self._watcher.subscribe(agenda_path, self._event_agenda)
+        self._watcher.subscribe(depend_path, self._event_depend)
 
-    def _reload_agenda(self, event):
+    def _event_agenda(self, event):
         if event != Event.Modified:
             raise RuntimeError('Unexpected file event %s' % event)
+        agenda_hash = _hash(self._agenda_path)
+        if self._agenda_hash == agenda_hash: return
+        self._agenda_hash = agenda_hash
         _msg('./%s was modified, rescheduling' % (
             _cwd_relative(agenda_path)
         ))
         self.pause()
-        self._on_agenda()
+        self._update_agenda()
         self.resume()
 
-    def _reload_depend(self, event):
+    def _event_depend(self, event):
+        depend_hash = _hash(self._depend_path)
+        if self._depend_hash == depend_hash: return
+        self._depend_hash = depend_hash
         _msg('./%s was modified, rescheduling' % (
             _cwd_relative(depend_path)
         ))
         self.pause()
-        self._on_depend()
+        self._update_depend()
         self.resume()
 
-    def _reload_source(self, source_path, event):
+    def _event_source(self, source_path, event):
+        _source_path = str(source_path)
+        if _source_path in self._source_hashes:
+            source_hash = _hash(source_path)
+            if self._source_hashes[_source_path] == source_hash: return
+            self._source_hashes[_source_path] = source_hash
         _msg('./%s was modified, rescheduling' % (
             _cwd_relative(source_path)
         ))
         self.pause()
-        self._on_source()
+        self._update_source()
         self.resume()
 
     def _update_explicits(self, explicits):
         for file_path in self._explicits.difference(explicits):
             self._watcher.unsubscribe(Path(file_path))
+            del self._source_hashes[file_path]
         for file_path in explicits.difference(self._explicits):
             _file_path = Path(file_path)
             self._watcher.subscribe(
-                _file_path, partial(self._reload_source, _file_path)
+                _file_path, partial(self._event_source, _file_path)
             )
+            self._source_hashes[file_path] = _hash(_file_path)
         self._explicits = explicits
 
     def _update_implicits(self, implicits):
         for file_path in self._implicits.difference(implicits):
             self._watcher.unsubscribe(Path(file_path))
+            del self._source_hashes[file_path]
         for file_path in implicits.difference(self._implicits):
             _file_path = Path(file_path)
             self._watcher.subscribe(
-                _file_path, partial(self._reload_source, _file_path)
+                _file_path, partial(self._event_source, _file_path)
             )
+            self._source_hashes[file_path] = _hash(_file_path)
         self._implicits = implicits
 
-    def _on_agenda(self):
-
+    def _update_agenda(self):
         def _agenda_explicits(agenda_data):
             return set.union(*[
                 { str(input) for input in task_data.inputs }
@@ -474,7 +497,7 @@ class DynamicEvaluator(Evaluator):
             self._cache
         ))
 
-    def _on_depend(self):
+    def _update_depend(self):
         self._depend_data = depend.load(self._depend_path)
         implicits, self._closures = _update_depend(
             self._agenda_data,
@@ -490,7 +513,7 @@ class DynamicEvaluator(Evaluator):
             self._cache
         ))
 
-    def _on_source(self):
+    def _update_source(self):
         self.reprogram(_make_schedule(
             self._tasks,
             self._agenda_data,
