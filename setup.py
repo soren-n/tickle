@@ -4,7 +4,7 @@ import sys
 import os
 
 # Project metadata
-NAME = 'tickle'
+NAME = 'tickle-workflow'
 DESCRIPTION = 'A command line workflow automation tool which performs task graph scheduling and concurrent task evaluation.'
 URL = 'https://github.com/soren-n/tickle'
 EMAIL = 'sorennorbaek@gmail.com'
