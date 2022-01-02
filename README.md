@@ -24,7 +24,7 @@ As such if you need to interface/overlap tickle with other systems in a workflow
 # Install
 Tickle is currently only supported for Python >=3.9, although it might work with older versions. It is distributed with pip and can be installed with the following command:
 ```
-$ python3 -m pip install tickle
+$ python3 -m pip install tickle-soren-n
 ```
 
 The pip install above will also install the following project dependencies:
