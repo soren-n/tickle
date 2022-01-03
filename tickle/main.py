@@ -569,7 +569,7 @@ def _clean(cache_path):
     for dir_path in reversed(sorted(cache['folders'])):
         if not _empty_dir(dir_path): continue
         _msg('Removing ./%s' % _cwd_relative(dir_path))
-        os.removedirs(dir_path)
+        os.rmdir(dir_path)
 
     # Remove cache
     _msg('Removing ./%s' % _cwd_relative(cache_path))
