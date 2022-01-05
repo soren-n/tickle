@@ -34,36 +34,37 @@ As such if you need to interface/overlap tickle with other systems in a workflow
 
 # Usage
 ```
-usage: tickle [-h] [--debug] [-a AGENDA] [-d DEPEND] [-c CACHE] [-l LOG]
+usage: tickle [-h] [--debug] [-w WORKERS] [-a AGENDA] [-d DEPEND] [-c CACHE] [-l LOG]
               {static,dynamic,clean,version}
 
 Task graph scheduling with asynchronous evaluation.
 
 positional arguments:
   {static,dynamic,clean,version}
-                        static for an inattentive evaluation mode where file modifications are
-                        ignored once tasks have been scheduled, dynamic for an attentive
-                        evaluation mode where file creations or modifications trigger a
-                        rescheduling of the task graph; clean mode will delete all files and
-                        folders generated during static or dynamic evaluation; version mode will
-                        print the tool version
+                        static for an inattentive evaluation mode where file modifications are ignored once
+                        tasks have been scheduled, dynamic for an attentive evaluation mode where file
+                        creations or modifications trigger a rescheduling of the task graph; clean mode will
+                        delete all files and folders generated during static or dynamic evaluation; version
+                        mode will print the tool version
 
 optional arguments:
   -h, --help            show this help message and exit
   --debug               Sets debug logging level for tool messages (default: False)
+  -w WORKERS, --workers WORKERS
+                        The number of concurrent workers; defaults to the number of logical cores minus one
+                        for the main thread (default: <logical core count>)
   -a AGENDA, --agenda AGENDA
-                        Agenda YAML file location; contains the procedure and task definitions,
-                        file path must be relative to current working directory (default:
-                        ./agenda.yaml)
+                        Agenda YAML file location; contains the procedure and task definitions, file path
+                        must be relative to current working directory (default: agenda.yaml)
   -d DEPEND, --depend DEPEND
-                        Depend YAML file location; contains a map of dynamic task dependencies,
-                        this file is optional, file path must be relative to current working
-                        directory (default: ./depend.yaml)
+                        Depend YAML file location; contains a map of dynamic task dependencies, this file is
+                        optional, file path must be relative to current working directory (default:
+                        depend.yaml)
   -c CACHE, --cache CACHE
-                        Binary cache file location; contains inter-run persistent data, file path
-                        must be relative to current working directory (default: ./cache.bin)
-  -l LOG, --log LOG     Log file location; contains runtime messages, file path must be relative
-                        to current working directory (default: ./tickle.log)
+                        Binary cache file location; contains inter-run persistent data, file path must be
+                        relative to current working directory (default: tickle.cache)
+  -l LOG, --log LOG     Log file location; contains runtime messages, file path must be relative to current
+                        working directory (default: tickle.log)
 ```
 If you stick to the default paths and file names, then running tickle should be as simple as:
 ```
@@ -80,6 +81,9 @@ procs:
     - <command word 1>
     - <command word 2>
     ...
+stages:
+  - [ <proc name 1>, <proc name 2>, ... ]
+  ...
 tasks:
   - desc: <task description>
     proc: <proc name>
@@ -99,9 +103,12 @@ tasks:
       ...
   ...
 ```
-The proc section defines a dictionary of procedures.
+The procs section defines a dictionary of procedures.
 A proc is defined with a name and it's implementation is a command as a list of string words.
 A command word is a parameter if it is prefixed with $.
+
+The stages section defines a list of stages.
+A stage is a list of procs, defining which procs are allowed to be evaluated in parallel. This is useful when you have clear separation in the evaluation order of tasks; you could achieve the same ordering without stages, by having a many-to-many dependency between the tasks that need separating, which is costly on the scheduler. So stages where added both as a semantic convenience as well as an optimisation.
 
 The tasks section defines a list of tasks.
 A task is an instantiation of a proc.

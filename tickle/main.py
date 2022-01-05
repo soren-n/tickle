@@ -646,28 +646,28 @@ def cli():
         '-a', '--agenda',
         type = str,
         dest = 'agenda',
-        default = './agenda.yaml',
+        default = 'agenda.yaml',
         help = 'Agenda YAML file location; contains the procedure and task definitions, file path must be relative to current working directory'
     )
     parser.add_argument(
         '-d', '--depend',
         type = str,
         dest = 'depend',
-        default = './depend.yaml',
+        default = 'depend.yaml',
         help = 'Depend YAML file location; contains a map of dynamic task dependencies, this file is optional, file path must be relative to current working directory'
     )
     parser.add_argument(
         '-c', '--cache',
         type = str,
         dest = 'cache',
-        default = './tickle.cache',
+        default = 'tickle.cache',
         help = 'Binary cache file location; contains inter-run persistent data, file path must be relative to current working directory'
     )
     parser.add_argument(
         '-l', '--log',
         type = str,
         dest = 'log',
-        default = './tickle.log',
+        default = 'tickle.log',
         help = 'Log file location; contains runtime messages, file path must be relative to current working directory'
     )
     success = main(parser.parse_args())
