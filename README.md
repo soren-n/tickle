@@ -41,30 +41,30 @@ Task graph scheduling with asynchronous evaluation.
 
 positional arguments:
   {static,dynamic,clean,version}
-                        static for an inattentive evaluation mode where file modifications are ignored once
-                        tasks have been scheduled, dynamic for an attentive evaluation mode where file
-                        creations or modifications trigger a rescheduling of the task graph; clean mode will
-                        delete all files and folders generated during static or dynamic evaluation; version
-                        mode will print the tool version
+                        static for an inattentive evaluation mode where file modifications are ignored
+                        once tasks have been scheduled, dynamic for an attentive evaluation mode where
+                        file creations or modifications trigger a rescheduling of the task graph; clean
+                        mode will delete all files and folders generated during static or dynamic
+                        evaluation; version mode will print the tool version
 
 optional arguments:
   -h, --help            show this help message and exit
   --debug               Sets debug logging level for tool messages (default: False)
   -w WORKERS, --workers WORKERS
-                        The number of concurrent workers; defaults to the number of logical cores minus one
-                        for the main thread (default: <logical core count>)
+                        The number of concurrent workers; defaults to the number of logical cores minus
+                        one for the main thread (default: <logical core count>)
   -a AGENDA, --agenda AGENDA
                         Agenda YAML file location; contains the procedure and task definitions, file path
                         must be relative to current working directory (default: agenda.yaml)
   -d DEPEND, --depend DEPEND
-                        Depend YAML file location; contains a map of dynamic task dependencies, this file is
-                        optional, file path must be relative to current working directory (default:
+                        Depend YAML file location; contains a map of dynamic task dependencies, this file
+                        is optional, file path must be relative to current working directory (default:
                         depend.yaml)
   -c CACHE, --cache CACHE
                         Binary cache file location; contains inter-run persistent data, file path must be
                         relative to current working directory (default: tickle.cache)
-  -l LOG, --log LOG     Log file location; contains runtime messages, file path must be relative to current
-                        working directory (default: tickle.log)
+  -l LOG, --log LOG     Log file location; contains runtime messages, file path must be relative to
+                        current working directory (default: tickle.log)
 ```
 If you stick to the default paths and file names, then running tickle should be as simple as:
 ```
