@@ -108,7 +108,8 @@ A proc is defined with a name and it's implementation is a command as a list of 
 A command word is a parameter if it is prefixed with $.
 
 The stages section defines a list of stages.
-A stage is a list of procs, defining which procs are allowed to be evaluated in parallel. This is useful when you have clear separation in the evaluation order of tasks; you could achieve the same ordering without stages, by having a many-to-many dependency between the tasks that need separating, which is costly on the scheduler. So stages where added both as a semantic convenience as well as an optimisation.
+A stage is a list of procs, defining which procs are allowed to be evaluated in parallel.
+This is useful when you have a clear separation in the evaluation order between groups of tasks; you could achieve the same ordering without stages, by having a many-to-many dependency between the task groups that need separating, which however would be costly on the scheduler. So stages were added as both a semantic convenience as well as an optimisation.
 
 The tasks section defines a list of tasks.
 A task is an instantiation of a proc.
