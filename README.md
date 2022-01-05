@@ -52,7 +52,7 @@ optional arguments:
   --debug               Sets debug logging level for tool messages (default: False)
   -w WORKERS, --workers WORKERS
                         The number of concurrent workers; defaults to the number of logical cores minus
-                        one for the main thread (default: <logical core count>)
+                        one for the main thread (default: <logical core count minus one>)
   -a AGENDA, --agenda AGENDA
                         Agenda YAML file location; contains the procedure and task definitions, file path
                         must be relative to current working directory (default: agenda.yaml)
