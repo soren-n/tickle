@@ -61,7 +61,7 @@ def compile(graph):
 
     # Find initial tasks
     def __find_roots(worklist, alive):
-        result = set()
+        result = list()
         visited = set()
         while len(worklist) != 0:
             task = worklist.pop(0)
@@ -69,12 +69,16 @@ def compile(graph):
             if task not in alive: continue
             visited.add(task)
             alive_deps = deps(task).intersection(alive)
-            if len(alive_deps) == 0: result.add(task)
+            if len(alive_deps) == 0: result.append(task)
             else: worklist += alive_deps
         return result
 
     # Join sequential tasks into groups
     def __join_tasks(worklist, alive):
+        def _should_join(task, alive_deps):
+            if len(alive_deps) != 1: return False
+            return alive_deps[0].get_stage() == task.get_stage()
+
         result = list()
         groups = dict()
         visited = set()
@@ -84,7 +88,7 @@ def compile(graph):
             visited.add(task)
             worklist += refs(task).intersection(alive)
             alive_deps = list(deps(task).intersection(alive))
-            if len(alive_deps) == 1:
+            if _should_join(task, alive_deps):
                 index = groups[alive_deps[0]]
                 result[index].append(task)
                 groups[task] = index
@@ -95,40 +99,79 @@ def compile(graph):
         return result, groups
 
     # Sort task groups in topological order
-    def __parallel_ordering(worklist, groups, group_map, alive):
-        def __group_refs(group):
+    def __parallel_ordering(groups, group_map):
+        def _add_work(worklist, work):
+            if len(groups) == 0: return
+            for item in work:
+                if item in worklist: continue
+                worklist.append(item)
+            worklist.sort(key = lambda group: groups[group][0].get_stage())
+
+        def __group_refs(group, alive):
             last = groups[group][-1]
             alive_refs = refs(last).intersection(alive)
             return set( group_map[ref] for ref in alive_refs )
-        def __group_deps(group):
+
+        def __group_deps(group, alive):
             first = groups[group][0]
             alive_deps = deps(first).intersection(alive)
             return set( group_map[dep] for dep in alive_deps )
-        result = dict()
-        priorities = dict()
-        visited = set()
-        while len(worklist) != 0:
-            group = worklist.pop(0)
-            if group in visited: continue
-            group_deps = __group_deps(group)
-            if len(group_deps.difference(visited)) != 0: continue
-            visited.add(group)
-            worklist += __group_refs(group)
-            priority = max([-1] + [ priorities[dep] for dep in group_deps ]) + 1
-            if priority not in result: result[priority] = set()
-            result[priority].add(group)
-            priorities[group] = priority
-        return [
-            [ groups[group] for group in result[priority] ]
-            for priority in range(len(result))
-        ]
+
+        def __parallel_batches(roots, alive):
+            result = dict()
+            batches = dict()
+            visited = set()
+            worklist = list()
+            _add_work(worklist, set( group_map[root] for root in roots ))
+            while len(worklist) != 0:
+                group = worklist.pop(0)
+                if group in visited: continue
+                group_deps = __group_deps(group, alive)
+                if len(group_deps.difference(visited)) != 0: continue
+                visited.add(group)
+                _add_work(worklist, __group_refs(group, alive))
+                batch = max([-1] + [ batches[dep] for dep in group_deps ]) + 1
+                if batch not in result: result[batch] = set()
+                result[batch].add(group)
+                batches[group] = batch
+            return [
+                [ groups[group] for group in result[batch] ]
+                for batch in range(len(result))
+            ]
+
+        # Sort by stage
+        alive_by_stage = dict()
+        groups_by_stage = dict()
+        for group in groups:
+            stage = group[0].get_stage()
+            if stage not in alive_by_stage:
+                alive_by_stage[stage] = set()
+                groups_by_stage[stage] = list()
+            alive_by_stage[stage] = alive_by_stage[stage].union(set(group))
+            groups_by_stage[stage].append(group)
+
+        # Roots of each stage
+        roots_by_stage = dict()
+        for stage in alive_by_stage.keys():
+            stage_groups = groups_by_stage[stage]
+            stage_alive = alive_by_stage[stage]
+            worklist = [group[0] for group in stage_groups]
+            roots_by_stage[stage] = __find_roots(worklist, stage_alive)
+
+        # Find batches of each stage
+        result = list()
+        for stage in sorted(list(alive_by_stage.keys())):
+            stage_roots = roots_by_stage[stage]
+            stage_alive = alive_by_stage[stage]
+            result += __parallel_batches(stage_roots, stage_alive)
+
+        # Done
+        return result
 
     targets = leafs(graph)
     if has_cycle(targets[:]):
         raise RuntimeError('Cycle detected in agenda!')
     alive = __reachable_alive(targets[:])
     roots = __find_roots(targets[:], alive)
-    seqs, seq_map = __join_tasks(list(roots), alive)
-    worklist = list(set( seq_map[root] for root in roots ))
-    result = __parallel_ordering(worklist, seqs, seq_map, alive)
-    return result
+    groups, group_map = __join_tasks(roots[:], alive)
+    return __parallel_ordering(groups, group_map)

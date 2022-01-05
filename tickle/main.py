@@ -33,13 +33,6 @@ def _critical(msg):
 ###############################################################################
 # Task graph util
 ###############################################################################
-cwd = str(Path.cwd())
-
-def _cwd_relative(path):
-    _path = str(path)
-    if not _path.startswith(cwd): return path
-    return Path('.%s' % _path[len(cwd):])
-
 def _hash_wait(file_path):
     while not file_path.exists(): sleep(0)
     with file_path.open('rb') as file:
@@ -52,12 +45,10 @@ def _hash(file_path):
 
 def _make_graph(agenda_data, cache):
     def _make_dirs(dir_path):
-        _dir_path = _cwd_relative(dir_path)
-        for parent_path in reversed(_dir_path.parents):
-            _parent_path = str(Path(cwd, parent_path))
+        for parent_path in reversed(dir_path.parents):
             try:
-                os.mkdir(_parent_path)
-                cache['folders'].add(_parent_path)
+                os.mkdir(parent_path)
+                cache['folders'].add(parent_path)
             except: continue
         cache.flush()
 
@@ -102,7 +93,7 @@ def _make_graph(agenda_data, cache):
     output_map = dict()
     for index, task_data in enumerate(agenda_data):
         task_name = 'task%d' % index
-        task = Task(partial(_eval_cmd, task_name, task_data))
+        task = Task(task_data.stage, partial(_eval_cmd, task_name, task_data))
         tasks.append(task)
         for file_path in task_data.outputs:
             output = str(file_path)
@@ -318,7 +309,8 @@ class StaticEvaluator(Evaluator):
         self._tasks = _make_graph(self._agenda_data, self._cache)
 
         # Add a terminating task to graph
-        terminate_task = Task(self.stop, True)
+        end_stage = max(task_data.stage for task_data in self._agenda_data) + 1
+        terminate_task = Task(end_stage, self.stop, True)
         terminate_task.add_dependencies(self._tasks)
         self._tasks.append(terminate_task)
 
@@ -333,9 +325,7 @@ class StaticEvaluator(Evaluator):
         depend_hash = _hash(self._depend_path)
         if self._depend_hash == depend_hash: return
         self._depend_hash = depend_hash
-        _info('./%s was modified, rescheduling' % (
-            _cwd_relative(self._depend_path)
-        ))
+        _info('%s was modified, rescheduling' % self._depend_path)
         self.pause()
         self._update_depend()
         self.resume()
@@ -419,9 +409,7 @@ class DynamicEvaluator(Evaluator):
         agenda_hash = _hash(self._agenda_path)
         if self._agenda_hash == agenda_hash: return
         self._agenda_hash = agenda_hash
-        _info('./%s was modified, rescheduling' % (
-            _cwd_relative(agenda_path)
-        ))
+        _info('%s was modified, rescheduling' % agenda_path)
         self.pause()
         self._update_agenda()
         self.resume()
@@ -430,9 +418,7 @@ class DynamicEvaluator(Evaluator):
         depend_hash = _hash(self._depend_path)
         if self._depend_hash == depend_hash: return
         self._depend_hash = depend_hash
-        _info('./%s was modified, rescheduling' % (
-            _cwd_relative(depend_path)
-        ))
+        _info('%s was modified, rescheduling' % depend_path)
         self.pause()
         self._update_depend()
         self.resume()
@@ -443,9 +429,7 @@ class DynamicEvaluator(Evaluator):
             source_hash = _hash(source_path)
             if self._source_hashes[_source_path] == source_hash: return
             self._source_hashes[_source_path] = source_hash
-        _info('./%s was modified, rescheduling' % (
-            _cwd_relative(source_path)
-        ))
+        _info('%s was modified, rescheduling' % source_path)
         self.pause()
         self._update_source()
         self.resume()
@@ -567,24 +551,25 @@ def _clean(cache_path):
     def _empty_dir(dir_path):
         return len(os.listdir(dir_path)) == 0
 
-    _info('Beginning of clean mode')
-
     # Load cache
+    if not cache_path.exists(): return True
     cache = Cache(cache_path)
+
+    _info('Beginning of clean mode')
 
     # Remove generated files
     for file_path in reversed(sorted(cache['files'])):
-        _info('Removing ./%s' % _cwd_relative(file_path))
+        _info('Removing %s' % file_path)
         os.remove(file_path)
 
     # Remove empty generated folders
     for dir_path in reversed(sorted(cache['folders'])):
         if not _empty_dir(dir_path): continue
-        _info('Removing ./%s' % _cwd_relative(dir_path))
+        _info('Removing %s' % dir_path)
         os.rmdir(dir_path)
 
     # Remove cache
-    _info('Removing ./%s' % _cwd_relative(cache_path))
+    _info('Removing %s' % cache_path)
     cache = None
     os.remove(cache_path)
 
@@ -604,16 +589,14 @@ def main(args):
         return True
 
     # Check agenda file path
-    agenda_path = Path(cwd, args.agenda)
+    agenda_path = Path(args.agenda)
     if not agenda_path.exists() and not agenda_path.is_file():
-        _critical('Agenda file not found: ./%s' % (
-            _cwd_relative(agenda_path)
-        ))
+        _critical('Agenda file not found: ./%s' % agenda_path)
         return False
 
     # Depend and cache file path
-    depend_path = Path(cwd, args.depend)
-    cache_path = Path(cwd, args.cache)
+    depend_path = Path(args.depend)
+    cache_path = Path(args.cache)
 
     # Handle logging
     logging.basicConfig(

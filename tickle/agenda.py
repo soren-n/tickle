@@ -21,10 +21,12 @@ class Task:
 @dataclass
 class Agenda:
     procs: dict[str, list[str]] = field(default_factory = dict)
+    stages: list[list[str]] = field(default_factory = list)
     tasks: list[Task] = field(default_factory = list)
 
 @dataclass
 class CompiledTask:
+    stage: int
     description: str
     command: list[str]
     inputs: set[Path]
@@ -73,17 +75,34 @@ def load(agenda_path):
             for name, proc in agenda_data.procs.items()
         }
 
+        # Stage to proc mapping
+        proc_stage = dict()
+        for index, stage in enumerate(agenda_data.stages):
+            for proc in stage:
+                if proc not in procs:
+                    raise RuntimeError('Undefined proc \"%s\" in stage %d' % (
+                        proc, index + 1
+                    ))
+                if proc in proc_stage:
+                    raise RuntimeError('Proc \"%s\" reserved for stage %d' % (
+                        proc, proc_stage[proc] + 1
+                    ))
+                proc_stage[proc] = index
+
         # Parse tasks
-        cwd = Path.cwd()
-        agenda = [
-            CompiledTask(
+        agenda = list()
+        for task in agenda_data.tasks:
+            if task.proc not in procs:
+                raise RuntimeError('Undefined proc \"%s\" for task \"%s\"' % (
+                    task.proc, task.desc
+                ))
+            agenda.append(CompiledTask(
+                stage = proc_stage[task.proc],
                 description = task.desc,
                 command = procs[task.proc](**task.args),
-                inputs = { Path(cwd, input) for input in set(task.inputs) },
-                outputs = { Path(cwd, output) for output in set(task.outputs) }
-            )
-            for task in agenda_data.tasks
-        ]
+                inputs = { Path(input) for input in set(task.inputs) },
+                outputs = { Path(output) for output in set(task.outputs) }
+            ))
 
         # Done
         return agenda

@@ -16,13 +16,12 @@ REQUIRES_PYTHON = '>=3.9.0'
 REQUIRED = ['pyyaml', 'watchdog']
 
 # Define long description
-cwd = Path(__file__).parent
-readme_path = Path(cwd, 'README.md')
+readme_path = Path('README.md')
 with readme_path.open('r', encoding = 'utf-8') as readme_file:
     LONG_DESCRIPTION = '\n%s' % readme_file.read()
 
 # Define version
-init_path = Path(cwd, './tickle/__init__.py')
+init_path = Path('tickle/__init__.py')
 with init_path.open('r', encoding = 'utf-8') as init_file:
     VERSION = init_file.readline().split(' = ')[1][1:-2]
 
@@ -38,7 +37,7 @@ class UploadCommand(Command):
 
     def run(self):
         self.status('Removing previous builds ...')
-        try: os.removedirs(Path(cwd, 'dist'))
+        try: os.removedirs(Path('dist'))
         except: pass
 
         self.status('Building Source and Wheel (universal) distribution ...')
