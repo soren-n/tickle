@@ -1,5 +1,5 @@
 # External module dependencies
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 from pathlib import Path
 import yaml
@@ -8,10 +8,10 @@ import yaml
 from . import dataspec
 
 ###############################################################################
-# Types
+# Datatypes
 ###############################################################################
 @dataclass
-class _Task:
+class Task:
     desc: str
     proc: str
     args: dict[str, list[str]]
@@ -19,18 +19,18 @@ class _Task:
     outputs: list[str]
 
 @dataclass
-class _Agenda:
-    procs: dict[str, list[str]]
-    tasks: list[_Task]
+class Agenda:
+    procs: dict[str, list[str]] = field(default_factory = dict)
+    tasks: list[Task] = field(default_factory = list)
 
 @dataclass
-class Task:
+class CompiledTask:
     description: str
     command: list[str]
     inputs: set[Path]
     outputs: set[Path]
 
-Agenda = list[Task]
+CompiledAgenda = list[CompiledTask]
 
 ###############################################################################
 # Functions
@@ -76,7 +76,7 @@ def load(agenda_path):
         # Parse tasks
         cwd = Path.cwd()
         agenda = [
-            Task(
+            CompiledTask(
                 description = task.desc,
                 command = procs[task.proc](**task.args),
                 inputs = { Path(cwd, input) for input in set(task.inputs) },
@@ -90,4 +90,10 @@ def load(agenda_path):
 
     with agenda_path.open('r') as agenda_file:
         raw_data = yaml.safe_load(agenda_file)
-        return _parse(dataspec.parse(_Agenda, raw_data))
+        return _parse(dataspec.decode(Agenda, raw_data))
+
+def store(agenda_path, agenda_data):
+    assert isinstance(agenda_data, Agenda)
+    with agenda_path.open('w+') as agenda_file:
+        raw_data = dataspec.encode(Agenda, agenda_data)
+        yaml.dump(raw_data, agenda_file)

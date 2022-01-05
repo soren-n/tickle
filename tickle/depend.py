@@ -6,10 +6,10 @@ import yaml
 from . import dataspec
 
 ###############################################################################
-# Types
+# Datatypes
 ###############################################################################
-_Depend = dict[str, list[str]]
-Depend = dict[str, set[Path]]
+Depend = dict[str, list[str]]
+CompiledDepend = dict[Path, set[Path]]
 
 ###############################################################################
 # Functions
@@ -18,7 +18,8 @@ def load(depend_path):
     cwd = Path.cwd()
     with depend_path.open('r') as depend_file:
         raw_data = yaml.safe_load(depend_file)
-        depend_data = dataspec.parse(_Depend, raw_data)
+        if raw_data is None: raw_data = {}
+        depend_data = dataspec.decode(Depend, raw_data)
         return {
             Path(cwd, src_path) : {
                 Path(cwd, dst_path)
@@ -26,3 +27,9 @@ def load(depend_path):
             }
             for src_path, dst_paths in depend_data.items()
         }
+
+def store(depend_path, depend_data):
+    assert isinstance(depend_data, depend)
+    with depend_path.open('w+') as depend_file:
+        raw_data = dataspec.encode(Depend, depend_data)
+        yaml.dump(raw_data, depend_file)

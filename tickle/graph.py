@@ -18,7 +18,7 @@ def has_cycle(worklist):
 
     visited = set()
     for task in worklist:
-        if _visit(task, [], visited): return True
+        if _visit(task, list(), visited): return True
         visited.add(task)
     return False
 
@@ -50,7 +50,7 @@ def compile(graph):
 
     # Find tasks that needs to be performed
     def __reachable_alive(worklist):
-        result = []
+        result = list()
         while len(worklist) != 0:
             task = worklist.pop(0)
             if task in result: continue
@@ -75,8 +75,8 @@ def compile(graph):
 
     # Join sequential tasks into groups
     def __join_tasks(worklist, alive):
-        result = []
-        groups = {}
+        result = list()
+        groups = dict()
         visited = set()
         while len(worklist) != 0:
             task = worklist.pop(0)
@@ -104,15 +104,16 @@ def compile(graph):
             first = groups[group][0]
             alive_deps = deps(first).intersection(alive)
             return set( group_map[dep] for dep in alive_deps )
-        result = {}
-        priorities = {}
+        result = dict()
+        priorities = dict()
         visited = set()
         while len(worklist) != 0:
             group = worklist.pop(0)
             if group in visited: continue
+            group_deps = __group_deps(group)
+            if len(group_deps.difference(visited)) != 0: continue
             visited.add(group)
             worklist += __group_refs(group)
-            group_deps = __group_deps(group)
             priority = max([-1] + [ priorities[dep] for dep in group_deps ]) + 1
             if priority not in result: result[priority] = set()
             result[priority].add(group)

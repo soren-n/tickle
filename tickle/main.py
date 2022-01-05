@@ -18,7 +18,7 @@ from . import graph
 ###############################################################################
 # Logging helpers
 ###############################################################################
-def _msg(msg):
+def _info(msg):
     logging.info(msg)
     print('[tickle] %s' % msg)
 
@@ -66,7 +66,7 @@ def _make_graph(agenda_data, cache):
             task_data.description,
             ' '.join(task_data.command)
         ))
-        _msg(task_data.description)
+        _info(task_data.description)
 
         # Ensure output folders exists
         for output_path in task_data.outputs:
@@ -128,17 +128,16 @@ def _update_depend(
     cache
     ):
 
-    def _agenda_sources(agenda_data, depend_data):
-        result = set.union(*[
-            { str(input) for input in task_data.inputs }
+    def _outputs(agenda_data, depend_data):
+        return set.union(*[
+            { str(output) for output in task_data.outputs }
             for task_data in agenda_data
-        ])
-        return set.union(result, *[
-            { str(dst_path) for dst_path in dst_paths }
-            for dst_paths in depend_data.values()
-        ])
+        ]).union({
+            str(src_path)
+            for src_path in depend_data.keys()
+        })
 
-    def _agenda_files(agenda_data):
+    def _explicits(agenda_data):
         return set.union(*[
             set.union(
                 { str(input) for input in task_data.inputs },
@@ -157,7 +156,7 @@ def _update_depend(
             src = str(src_path)
             dsts = { str(dst_path) for dst_path in dst_paths }
             if src not in result: result[src] = set()
-            result[src] = set.union(result[src], dsts)
+            result[src] = result[src].union(dsts)
         return result
 
     def _has_cycle(worklist, graph):
@@ -179,14 +178,14 @@ def _update_depend(
             visited.add(node)
         return False
 
-    def _reachable(worklist, graph):
+    def _reachable(worklist, deps):
         result = list()
         while len(worklist) != 0:
             node = worklist.pop(0)
             if node in result: continue
             result.append(node)
-            if node not in graph: continue
-            worklist += graph[node]
+            if node not in deps: continue
+            worklist += deps[node]
         return result
 
     def _leafs(nodes, graph):
@@ -202,30 +201,41 @@ def _update_depend(
                 result[dst].add(src)
         return result
 
+    def _topological_order(worklist, deps, refs):
+        result = list()
+        while len(worklist) != 0:
+            node = worklist.pop(0)
+            if node in result: continue
+            node_deps = deps[node] if node in deps else set()
+            if len(node_deps.difference(set(result))) != 0: continue
+            result.append(node)
+            worklist += refs[node] if node in refs else set()
+        return result
+
     # Find agenda sources and check for cycles against depend
-    nodes = list(_agenda_sources(agenda_data, depend_data))
-    graph = _join_graphs(agenda_data, depend_data)
-    if _has_cycle(nodes[:], graph):
+    nodes = list(_outputs(agenda_data, depend_data))
+    deps = _join_graphs(agenda_data, depend_data)
+    if _has_cycle(nodes[:], deps):
         raise RuntimeError('Cycle found in depend!')
 
     # Find dependency closures
     depend_closures = dict()
-    alive = _reachable(nodes[:], graph)
-    ordered_depends = _reachable(
-        _leafs(alive, graph),
-        _inverse_graph_alive(alive, graph)
+    alive = _reachable(nodes[:], deps)
+    ordered_depends = _topological_order(
+        _leafs(alive, deps), deps,
+        _inverse_graph_alive(alive, deps)
     )
     for src_file in ordered_depends:
-        if src_file not in graph:
+        if src_file not in deps:
             depend_closures[src_file] = set()
             continue
-        deps = graph[src_file]
-        depend_closures[src_file] = set.union(deps, *[
-            depend_closures[dst_file] for dst_file in deps
+        src_deps = deps[src_file]
+        depend_closures[src_file] = set.union(src_deps, *[
+            depend_closures[dst_file] for dst_file in src_deps
         ])
 
     # Done
-    implicits = set(alive).difference(_agenda_files(agenda_data))
+    implicits = set(alive).difference(_explicits(agenda_data))
     return implicits, depend_closures
 
 def _make_schedule(tasks, agenda_data, depend_closures, cache):
@@ -295,8 +305,8 @@ def _make_schedule(tasks, agenda_data, depend_closures, cache):
 # Static evaluation mode
 ###############################################################################
 class StaticEvaluator(Evaluator):
-    def __init__(self, agenda_path, depend_path, cache_path):
-        super().__init__()
+    def __init__(self, agenda_path, depend_path, cache_path, worker_count):
+        super().__init__(worker_count)
         self._depend_path = depend_path
 
         # Setup cache and file watcher
@@ -323,7 +333,7 @@ class StaticEvaluator(Evaluator):
         depend_hash = _hash(self._depend_path)
         if self._depend_hash == depend_hash: return
         self._depend_hash = depend_hash
-        _msg('./%s was modified, rescheduling' % (
+        _info('./%s was modified, rescheduling' % (
             _cwd_relative(self._depend_path)
         ))
         self.pause()
@@ -356,14 +366,15 @@ class StaticEvaluator(Evaluator):
         self._watcher.stop()
         super().stop()
 
-def _static(agenda_path, depend_path, cache_path):
-    _msg('Beginning of evaluation in static mode')
+def _static(agenda_path, depend_path, cache_path, worker_count):
+    _info('Beginning of evaluation in static mode')
 
     # Run static evaluator
     evaluator = StaticEvaluator(
         agenda_path,
         depend_path,
-        cache_path
+        cache_path,
+        worker_count
     )
     try: evaluator.start()
     except TaskError as error:
@@ -371,7 +382,7 @@ def _static(agenda_path, depend_path, cache_path):
             error.description, error.message
         ))
     finally:
-        _msg('End of evaluation in static mode')
+        _info('End of evaluation in static mode')
 
     # Done
     return True
@@ -380,8 +391,8 @@ def _static(agenda_path, depend_path, cache_path):
 # Dynamic evaluation mode
 ###############################################################################
 class DynamicEvaluator(Evaluator):
-    def __init__(self, agenda_path, depend_path, cache_path):
-        super().__init__()
+    def __init__(self, agenda_path, depend_path, cache_path, worker_count):
+        super().__init__(worker_count)
         self._agenda_path = agenda_path
         self._depend_path = depend_path
 
@@ -408,7 +419,7 @@ class DynamicEvaluator(Evaluator):
         agenda_hash = _hash(self._agenda_path)
         if self._agenda_hash == agenda_hash: return
         self._agenda_hash = agenda_hash
-        _msg('./%s was modified, rescheduling' % (
+        _info('./%s was modified, rescheduling' % (
             _cwd_relative(agenda_path)
         ))
         self.pause()
@@ -419,7 +430,7 @@ class DynamicEvaluator(Evaluator):
         depend_hash = _hash(self._depend_path)
         if self._depend_hash == depend_hash: return
         self._depend_hash = depend_hash
-        _msg('./%s was modified, rescheduling' % (
+        _info('./%s was modified, rescheduling' % (
             _cwd_relative(depend_path)
         ))
         self.pause()
@@ -432,7 +443,7 @@ class DynamicEvaluator(Evaluator):
             source_hash = _hash(source_path)
             if self._source_hashes[_source_path] == source_hash: return
             self._source_hashes[_source_path] = source_hash
-        _msg('./%s was modified, rescheduling' % (
+        _info('./%s was modified, rescheduling' % (
             _cwd_relative(source_path)
         ))
         self.pause()
@@ -534,18 +545,19 @@ class DynamicEvaluator(Evaluator):
             error.description, error.message
         ))
 
-def _dynamic(agenda_path, depend_path, cache_path):
-    _msg('Beginning of evaluation in dynamic mode')
+def _dynamic(agenda_path, depend_path, cache_path, worker_count):
+    _info('Beginning of evaluation in dynamic mode')
 
     # Run dynamic evaluator
     evaluator = DynamicEvaluator(
         agenda_path,
         depend_path,
-        cache_path
+        cache_path,
+        worker_count
     ).start()
 
     # Done
-    _msg('End of evaluation in dynamic mode')
+    _info('End of evaluation in dynamic mode')
     return True
 
 ###############################################################################
@@ -555,29 +567,29 @@ def _clean(cache_path):
     def _empty_dir(dir_path):
         return len(os.listdir(dir_path)) == 0
 
-    _msg('Beginning of clean mode')
+    _info('Beginning of clean mode')
 
     # Load cache
     cache = Cache(cache_path)
 
     # Remove generated files
     for file_path in reversed(sorted(cache['files'])):
-        _msg('Removing ./%s' % _cwd_relative(file_path))
+        _info('Removing ./%s' % _cwd_relative(file_path))
         os.remove(file_path)
 
     # Remove empty generated folders
     for dir_path in reversed(sorted(cache['folders'])):
         if not _empty_dir(dir_path): continue
-        _msg('Removing ./%s' % _cwd_relative(dir_path))
+        _info('Removing ./%s' % _cwd_relative(dir_path))
         os.rmdir(dir_path)
 
     # Remove cache
-    _msg('Removing ./%s' % _cwd_relative(cache_path))
+    _info('Removing ./%s' % _cwd_relative(cache_path))
     cache = None
     os.remove(cache_path)
 
     # Done
-    _msg('End of clean mode')
+    _info('End of clean mode')
     return True
 
 ###############################################################################
@@ -613,15 +625,16 @@ def main(args):
 
     # Run specified mode
     if args.mode == 'static':
-        return _static(agenda_path, depend_path, cache_path)
+        return _static(agenda_path, depend_path, cache_path, args.workers)
     if args.mode == 'dynamic':
-        return _dynamic(agenda_path, depend_path, cache_path)
+        return _dynamic(agenda_path, depend_path, cache_path, args.workers)
     if args.mode == 'clean':
         return _clean(cache_path)
 
 def cli():
-    import sys
+    from multiprocessing import cpu_count
     import argparse
+    import sys
 
     parser = argparse.ArgumentParser(
         prog = 'tickle',
@@ -638,6 +651,13 @@ def cli():
         dest = 'debug',
         action = 'store_true',
         help = 'Sets debug logging level for tool messages'
+    )
+    parser.add_argument(
+        '-w', '--workers',
+        type = int,
+        dest = 'workers',
+        default = cpu_count() - 1,
+        help = 'The number of concurrent workers; defaults to the number of logical cores minus one for the main thread'
     )
     parser.add_argument(
         '-a', '--agenda',
@@ -657,7 +677,7 @@ def cli():
         '-c', '--cache',
         type = str,
         dest = 'cache',
-        default = './cache.bin',
+        default = './tickle.cache',
         help = 'Binary cache file location; contains inter-run persistent data, file path must be relative to current working directory'
     )
     parser.add_argument(

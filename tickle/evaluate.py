@@ -1,5 +1,4 @@
 # External module dependencies
-from multiprocessing import cpu_count
 from threading import Thread, Event
 from queue import Queue, Empty
 from time import sleep
@@ -87,9 +86,8 @@ class Worker(Thread):
     def stop(self):
         self._running = False
 
-MAX_WORKER_COUNT = cpu_count() - 1
 class Evaluator:
-    def __init__(self, worker_count = MAX_WORKER_COUNT):
+    def __init__(self, worker_count):
         self._running = False
         self._paused = False
         self._program = []
