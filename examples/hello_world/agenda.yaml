@@ -1,15 +1,6 @@
 procs:
-  compile_cpp:
-    - g++
-    - -c
-    - $src
-    - -o
-    - $dst
-  link_exe:
-    - g++
-    - $objs
-    - -o
-    - $exe
+  compile_cpp: [ g++, -c, $src, -o, $dst ]
+  link_exe: [ g++, $objs, -o, $exe ]
 stages:
   - [ compile_cpp, link_exe ]
 tasks:
