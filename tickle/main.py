@@ -409,7 +409,7 @@ class OnlineEvaluator(Evaluator):
         agenda_hash = _hash(self._agenda_path)
         if self._agenda_hash == agenda_hash: return
         self._agenda_hash = agenda_hash
-        _info('%s was modified, rescheduling' % agenda_path)
+        _info('%s was modified, rescheduling' % self._agenda_path)
         self.pause()
         self._update_agenda()
         self.resume()
@@ -418,7 +418,7 @@ class OnlineEvaluator(Evaluator):
         depend_hash = _hash(self._depend_path)
         if self._depend_hash == depend_hash: return
         self._depend_hash = depend_hash
-        _info('%s was modified, rescheduling' % depend_path)
+        _info('%s was modified, rescheduling' % self._depend_path)
         self.pause()
         self._update_depend()
         self.resume()
