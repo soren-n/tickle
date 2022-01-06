@@ -286,9 +286,6 @@ def _make_schedule(tasks, agenda_data, depend_closures, cache):
             for file_path, curr_hash in curr_hashes.items()
         }
         if all(equal_hashes.values()): continue
-        for file_path, equal in equal_hashes.items():
-            if equal: continue
-            print(file_path, prev_hashes[file_path], curr_hashes[file_path])
         task.set_valid(False)
         cache['hashes'][task_name] = curr_hashes
 
