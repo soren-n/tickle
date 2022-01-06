@@ -2,6 +2,8 @@
 from dataclasses import dataclass, field
 from typing import Callable
 from pathlib import Path
+import hashlib
+import json
 import yaml
 
 # Internal module dependencies
@@ -26,6 +28,7 @@ class Agenda:
 
 @dataclass
 class CompiledTask:
+    hash: int
     stage: int
     description: str
     command: list[str]
@@ -67,6 +70,15 @@ def load(agenda_path):
 
         return _apply
 
+    def _task_hash(task):
+        data = json.dumps({
+            'proc': task.proc,
+            'args': task.args,
+            'inputs': list(sorted(task.inputs)),
+            'outputs': list(sorted(task.outputs))
+        }, sort_keys = True)
+        return hashlib.md5(data.encode('utf-8')).hexdigest()
+
     def _parse(agenda_data):
 
         # Compile procs
@@ -97,6 +109,7 @@ def load(agenda_path):
                     task.proc, task.desc
                 ))
             agenda.append(CompiledTask(
+                hash = _task_hash(task),
                 stage = proc_stage[task.proc],
                 description = task.desc,
                 command = procs[task.proc](**task.args),

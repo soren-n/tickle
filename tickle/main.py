@@ -75,7 +75,7 @@ def _make_graph(agenda_data, cache):
             raise TaskError(task_data.description, result.stderr)
 
         # Update cached hashes
-        cache[task_name].update({
+        cache['hashes'][task_name].update({
             str(input) : _hash_wait(input)
             for input in task_data.inputs
         })
@@ -232,20 +232,37 @@ def _update_depend(
 def _make_schedule(tasks, agenda_data, depend_closures, cache):
 
     # Clear graph progress and prepare cache
-    if 'files' not in cache: cache['files'] = set()
-    if 'folders' not in cache: cache['folders'] = set()
+    if 'files' not in cache:
+        cache['files'] = set()
+        cache['folders'] = set()
+        cache['recover'] = dict()
+        cache['hashes'] = dict()
     for index, task in enumerate(tasks):
         task_name = 'task%d' % index
         task.set_valid(True)
-        if task_name in cache: continue
-        cache[task_name] = {}
+        if task_name in cache['hashes']: continue
+        cache['hashes'][task_name] = {}
+
+    # Task recovery
+    hashes = dict()
+    recover = cache['recover']
+    cache['recover'] = dict()
+    for index, task in enumerate(agenda_data):
+        new_task_name = 'task%d' % index
+        cache['recover'][task.hash] = new_task_name
+        if task.hash in recover:
+            old_task_name = recover[task.hash]
+            hashes[new_task_name] = cache['hashes'][old_task_name]
+        else:
+            hashes[new_task_name] = cache['hashes'][new_task_name]
+    cache['hashes'] = hashes
 
     # Check input files
     for index, task in enumerate(tasks):
         if index >= len(agenda_data): continue
         task_name = 'task%d' % index
         task_data = agenda_data[index]
-        prev_hashes = cache[task_name]
+        prev_hashes = cache['hashes'][task_name]
 
         # Check for depend closure change
         inputs = { str(input) for input in task_data.inputs }
@@ -272,7 +289,7 @@ def _make_schedule(tasks, agenda_data, depend_closures, cache):
         }
         if all(diff_hashes.values()): continue
         task.set_valid(False)
-        cache[task_name] = curr_hashes
+        cache['hashes'][task_name] = curr_hashes
 
     # Flush any cache changes
     cache.flush()
