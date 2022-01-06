@@ -293,9 +293,9 @@ def _make_schedule(tasks, agenda_data, depend_closures, cache):
     return graph.compile(tasks)
 
 ###############################################################################
-# Static evaluation mode
+# Offline evaluation mode
 ###############################################################################
-class StaticEvaluator(Evaluator):
+class OfflineEvaluator(Evaluator):
     def __init__(self, agenda_path, depend_path, cache_path, worker_count):
         super().__init__(worker_count)
         self._depend_path = depend_path
@@ -318,7 +318,7 @@ class StaticEvaluator(Evaluator):
         self._depend_hash = _hash(self._depend_path)
         self._update_depend()
 
-        # Dynamic reload of depend
+        # Online reload of depend
         self._watcher.subscribe(depend_path, self._event_depend)
 
     def _event_depend(self, event):
@@ -356,11 +356,11 @@ class StaticEvaluator(Evaluator):
         self._watcher.stop()
         super().stop()
 
-def _static(agenda_path, depend_path, cache_path, worker_count):
-    _info('Beginning of evaluation in static mode')
+def _offline(agenda_path, depend_path, cache_path, worker_count):
+    _info('Beginning of evaluation in offline mode')
 
-    # Run static evaluator
-    evaluator = StaticEvaluator(
+    # Run offline evaluator
+    evaluator = OfflineEvaluator(
         agenda_path,
         depend_path,
         cache_path,
@@ -372,15 +372,15 @@ def _static(agenda_path, depend_path, cache_path, worker_count):
             error.description, error.message
         ))
     finally:
-        _info('End of evaluation in static mode')
+        _info('End of evaluation in offline mode')
 
     # Done
     return True
 
 ###############################################################################
-# Dynamic evaluation mode
+# Online evaluation mode
 ###############################################################################
-class DynamicEvaluator(Evaluator):
+class OnlineEvaluator(Evaluator):
     def __init__(self, agenda_path, depend_path, cache_path, worker_count):
         super().__init__(worker_count)
         self._agenda_path = agenda_path
@@ -529,11 +529,11 @@ class DynamicEvaluator(Evaluator):
             error.description, error.message
         ))
 
-def _dynamic(agenda_path, depend_path, cache_path, worker_count):
-    _info('Beginning of evaluation in dynamic mode')
+def _online(agenda_path, depend_path, cache_path, worker_count):
+    _info('Beginning of evaluation in online mode')
 
-    # Run dynamic evaluator
-    evaluator = DynamicEvaluator(
+    # Run online evaluator
+    evaluator = OnlineEvaluator(
         agenda_path,
         depend_path,
         cache_path,
@@ -541,11 +541,11 @@ def _dynamic(agenda_path, depend_path, cache_path, worker_count):
     ).start()
 
     # Done
-    _info('End of evaluation in dynamic mode')
+    _info('End of evaluation in online mode')
     return True
 
 ###############################################################################
-# Dynamic evaluation mode
+# Clean mode
 ###############################################################################
 def _clean(cache_path):
     def _empty_dir(dir_path):
@@ -607,10 +607,10 @@ def main(args):
     )
 
     # Run specified mode
-    if args.mode == 'static':
-        return _static(agenda_path, depend_path, cache_path, args.workers)
-    if args.mode == 'dynamic':
-        return _dynamic(agenda_path, depend_path, cache_path, args.workers)
+    if args.mode == 'offline':
+        return _offline(agenda_path, depend_path, cache_path, args.workers)
+    if args.mode == 'online':
+        return _online(agenda_path, depend_path, cache_path, args.workers)
     if args.mode == 'clean':
         return _clean(cache_path)
 
@@ -626,8 +626,8 @@ def cli():
     )
     parser.add_argument(
         'mode', type = str,
-        choices = ['static', 'dynamic', 'clean', 'version'],
-        help = 'static for an inattentive evaluation mode where file modifications are ignored once tasks have been scheduled, dynamic for an attentive evaluation mode where file creations or modifications trigger a rescheduling of the task graph; clean mode will delete all files and folders generated during static or dynamic evaluation; version mode will print the tool version'
+        choices = ['offline', 'online', 'clean', 'version'],
+        help = 'Offline mode for an inattentive evaluation mode where file modifications are ignored once tasks have been scheduled. Online mode for an attentive evaluation mode where file creations or modifications trigger a rescheduling of the task graph. Clean mode will delete all files and folders generated during offline or online evaluation. Version mode will print the tool version.'
     )
     parser.add_argument(
         '--debug',

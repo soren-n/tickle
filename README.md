@@ -17,13 +17,14 @@ The pip install above will also install the following project dependencies:
 - [Watchdog](https://github.com/gorakhargosh/watchdog)
 
 # Modes
-Tickle has three modes:
+Tickle has four modes:
 
-- The __static mode__ builds the task graph once and will schedule and evaluate from this. However it will also watch the depend file for dynamic dependency changes, and reschedule as necessary.
-- The __dynamic mode__ will watch the agenda file and initial input files for changes, as well as the depend file for dynamic dependency changes. It will then dynamically schedule and evaluate as the task graph changes.
-- The __clean mode__ will delete any files or folders generated during a previous static or dynamic evaluation.
+- The __offline mode__ builds the task graph once and will schedule and evaluate from this. However it will also watch the depend file for dynamic dependency changes, and reschedule as necessary.
+- The __online mode__ will watch the agenda file and initial input files for changes, as well as the depend file for dynamic dependency changes. It will then dynamically schedule and evaluate as the task graph changes.
+- The __clean mode__ will delete any files or folders generated during a previous offline or online evaluation.
+- The __version mode__ will print the installed version tickle.
 
-In build system terms, static mode is like a regular full build, and dynamic mode is like a watch/dev/live build. Both are incremental.
+In build system terms, offline mode is like a regular build, and online mode is like a watch/dev/live build. Both are incremental.
 
 The clean mode will only delete generated folders if they are empty after generated files are deleted; i.e. if there are leftover files in the folders, e.g. generated from other processes not within the control of tickle; these files and the host folders are then left untouched.
 
@@ -35,43 +36,46 @@ As such if you need to interface/overlap tickle with other systems in a workflow
 # Usage
 ```
 usage: tickle [-h] [--debug] [-w WORKERS] [-a AGENDA] [-d DEPEND] [-c CACHE] [-l LOG]
-              {static,dynamic,clean,version}
+              {offline,online,clean,version}
 
 Task graph scheduling with asynchronous evaluation.
 
 positional arguments:
-  {static,dynamic,clean,version}
-                        static for an inattentive evaluation mode where file modifications are ignored
-                        once tasks have been scheduled, dynamic for an attentive evaluation mode where
-                        file creations or modifications trigger a rescheduling of the task graph; clean
-                        mode will delete all files and folders generated during static or dynamic
-                        evaluation; version mode will print the tool version
+  {offline,online,clean,version}
+                        Offline mode for an inattentive evaluation mode where file
+                        modifications are ignored once tasks have been scheduled. Online
+                        mode for an attentive evaluation mode where file creations or
+                        modifications trigger a rescheduling of the task graph. Clean mode
+                        will delete all files and folders generated during offline or
+                        online evaluation. Version mode will print the tool version.
 
 optional arguments:
   -h, --help            show this help message and exit
   --debug               Sets debug logging level for tool messages (default: False)
   -w WORKERS, --workers WORKERS
-                        The number of concurrent workers; defaults to the number of logical cores minus
-                        one for the main thread (default: <logical core count minus one>)
+                        The number of concurrent workers; defaults to the number of
+                        logical cores minus one for the main thread (default: e.g. 3)
   -a AGENDA, --agenda AGENDA
-                        Agenda YAML file location; contains the procedure and task definitions, file path
-                        must be relative to current working directory (default: agenda.yaml)
+                        Agenda YAML file location; contains the procedure and task
+                        definitions, file path must be relative to current working
+                        directory (default: agenda.yaml)
   -d DEPEND, --depend DEPEND
-                        Depend YAML file location; contains a map of dynamic task dependencies, this file
-                        is optional, file path must be relative to current working directory (default:
-                        depend.yaml)
+                        Depend YAML file location; contains a map of dynamic task
+                        dependencies, this file is optional, file path must be relative to
+                        current working directory (default: depend.yaml)
   -c CACHE, --cache CACHE
-                        Binary cache file location; contains inter-run persistent data, file path must be
-                        relative to current working directory (default: tickle.cache)
-  -l LOG, --log LOG     Log file location; contains runtime messages, file path must be relative to
-                        current working directory (default: tickle.log)
+                        Binary cache file location; contains inter-run persistent data,
+                        file path must be relative to current working directory (default:
+                        tickle.cache)
+  -l LOG, --log LOG     Log file location; contains runtime messages, file path must be
+                        relative to current working directory (default: tickle.log)
 ```
 If you stick to the default paths and file names, then running tickle should be as simple as:
 ```
 $ cd my_workflow
 $ tickle MODE
 ```
-Where `MODE` is one of static, dynamic or clean.
+Where `MODE` is one of offline, online, clean or version.
 
 ## The agenda file
 The agenda file is a YAML file with the follow grammar:
@@ -134,7 +138,7 @@ The depend file is a YAML file with the following grammar:
 ```
 The file defines a dictionary of file path to list of file paths, i.e. a file path dependency graph.
 
-You should think of the depend file as describing the implicit dependencies between files for a task, i.e. uncovered by scanning the content of the files; e.g. source file to header file in a code project build workflow; the source file to header file dependencies change more often during development than the static dependencies mentioned earlier, and as such should be defined in the depend file and not the agenda file.
+You should think of the depend file as describing the implicit dependencies between files for a task, i.e. uncovered by scanning the content of the files; e.g. source file to header file in a code project build workflow; the source file to header file dependencies change more often during development than the task dependencies mentioned earlier, and as such should be defined in the depend file and not the agenda file.
 
 For more context please check out the examples directory.
 
@@ -142,5 +146,5 @@ For more context please check out the examples directory.
 The example project named hello_world is a simple C++ build example. To build the project in watch/dev mode; run the following command line:
 ```
 $ cd tickle/examples/hello_world
-$ tickle dynamic
+$ tickle online
 ```
