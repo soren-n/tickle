@@ -109,7 +109,7 @@ class Evaluator:
             work = self._queue.get(timeout=1)
             perform(work)
             self._queue.task_done()
-        except Empty: sleep(0)
+        except Empty: sleep(1)
         except Exception as e:
             self._exception.put(e)
             self._queue.task_done()

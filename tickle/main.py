@@ -34,7 +34,7 @@ def _critical(msg):
 # Task graph util
 ###############################################################################
 def _hash_wait(file_path):
-    while not file_path.exists(): sleep(0)
+    while not file_path.exists(): sleep(1)
     with file_path.open('rb') as file:
         return hashlib.md5(file.read()).hexdigest()
 
@@ -75,10 +75,8 @@ def _make_graph(agenda_data, cache):
             raise TaskError(task_data.description, result.stderr)
 
         # Update cached hashes
-        cache['hashes'][task_name].update({
-            str(input) : _hash_wait(input)
-            for input in task_data.inputs
-        })
+        for input in cache['hashes'][task_name].keys():
+            cache['hashes'][task_name][input] = _hash_wait(Path(input))
         cache['files'] = set.union(cache['files'], {
             str(output) for output in task_data.outputs
         })
@@ -283,11 +281,14 @@ def _make_schedule(tasks, agenda_data, depend_closures, cache):
             file_path : _hash(Path(file_path))
             for file_path in curr_closure
         }
-        diff_hashes = {
+        equal_hashes = {
             file_path : curr_hash == prev_hashes[file_path]
             for file_path, curr_hash in curr_hashes.items()
         }
-        if all(diff_hashes.values()): continue
+        if all(equal_hashes.values()): continue
+        for file_path, equal in equal_hashes.items():
+            if equal: continue
+            print(file_path, prev_hashes[file_path], curr_hashes[file_path])
         task.set_valid(False)
         cache['hashes'][task_name] = curr_hashes
 
