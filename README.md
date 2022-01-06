@@ -22,7 +22,7 @@ Tickle has four modes:
 - The __offline mode__ builds the task graph once and will schedule and evaluate from this. However it will also watch the depend file for dynamic dependency changes, and reschedule as necessary.
 - The __online mode__ will watch the agenda file and initial input files for changes, as well as the depend file for dynamic dependency changes. It will then dynamically schedule and evaluate as the task graph changes.
 - The __clean mode__ will delete any files or folders generated during a previous offline or online evaluation.
-- The __version mode__ will print the installed version tickle.
+- The __version mode__ will print the installed version of tickle.
 
 In build system terms, offline mode is like a regular build, and online mode is like a watch/dev/live build. Both are incremental.
 
