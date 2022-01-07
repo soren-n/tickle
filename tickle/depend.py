@@ -15,13 +15,14 @@ CompiledDepend = dict[Path, set[Path]]
 # Functions
 ###############################################################################
 def load(depend_path):
+    target_dir = depend_path.parent
     with depend_path.open('r') as depend_file:
         raw_data = yaml.safe_load(depend_file)
         if raw_data is None: raw_data = {}
         depend_data = dataspec.decode(Depend, raw_data)
         return {
-            Path(src_path) : {
-                Path(dst_path)
+            Path(target_dir, src_path) : {
+                Path(target_dir, dst_path)
                 for dst_path in set(dst_paths)
             }
             for src_path, dst_paths in depend_data.items()

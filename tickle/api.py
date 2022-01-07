@@ -330,8 +330,15 @@ def _make_schedule(tasks, agenda_data, depend_closures, cache):
 # Offline evaluation mode
 ###############################################################################
 class OfflineEvaluator(Evaluator):
-    def __init__(self, agenda_path, depend_path, cache_path, worker_count):
+    def __init__(self,
+        target_dir,
+        agenda_path,
+        depend_path,
+        cache_path,
+        worker_count
+        ):
         super().__init__(worker_count)
+        self._target_dir = target_dir
         self._depend_path = depend_path
 
         # Setup cache and file watcher
@@ -359,7 +366,9 @@ class OfflineEvaluator(Evaluator):
         depend_hash = _hash(self._depend_path)
         if self._depend_hash == depend_hash: return
         self._depend_hash = depend_hash
-        _info('%s was modified, rescheduling' % self._depend_path)
+        _info('%s was modified, rescheduling' % (
+            self._depend_path.relative_to(self._target_dir)
+        ))
         self.pause()
         self._update_depend()
         self.resume()
@@ -391,13 +400,20 @@ class OfflineEvaluator(Evaluator):
         super().stop()
 
 def offline(
-    agenda_path = default_agenda_path(),
-    depend_path = default_depend_path(),
-    cache_path = default_cache_path(),
-    log_path = default_log_path(),
+    target_dir,
+    agenda_path,
+    depend_path,
+    cache_path,
+    log_path,
     worker_count = default_worker_count(),
     debug = False
     ):
+
+    assert target_dir.is_absolute()
+    assert agenda_path.is_relative_to(target_dir)
+    assert depend_path.is_relative_to(target_dir)
+    assert cache_path.is_relative_to(target_dir)
+    assert log_path.is_relative_to(target_dir)
 
     # Handle logging
     logging.basicConfig(
@@ -409,12 +425,15 @@ def offline(
 
     # Check agenda file path
     if not agenda_path.exists() and not agenda_path.is_file():
-        _critical('Agenda file not found: ./%s' % agenda_path)
+        _critical('Agenda file not found: %s' % (
+            agenda_path.relative_to(target_dir)
+        ))
         return False
 
     # Run offline evaluator
     _info('Beginning of evaluation in offline mode')
     evaluator = OfflineEvaluator(
+        target_dir,
         agenda_path,
         depend_path,
         cache_path,
@@ -435,8 +454,15 @@ def offline(
 # Online evaluation mode
 ###############################################################################
 class OnlineEvaluator(Evaluator):
-    def __init__(self, agenda_path, depend_path, cache_path, worker_count):
+    def __init__(self,
+        target_dir,
+        agenda_path,
+        depend_path,
+        cache_path,
+        worker_count
+        ):
         super().__init__(worker_count)
+        self._target_dir = target_dir
         self._agenda_path = agenda_path
         self._depend_path = depend_path
 
@@ -463,7 +489,9 @@ class OnlineEvaluator(Evaluator):
         agenda_hash = _hash(self._agenda_path)
         if self._agenda_hash == agenda_hash: return
         self._agenda_hash = agenda_hash
-        _info('%s was modified, rescheduling' % self._agenda_path)
+        _info('%s was modified, rescheduling' % (
+            self._agenda_path.relative_to(self._target_dir)
+        ))
         self.pause()
         self._update_agenda()
         self.resume()
@@ -472,7 +500,9 @@ class OnlineEvaluator(Evaluator):
         depend_hash = _hash(self._depend_path)
         if self._depend_hash == depend_hash: return
         self._depend_hash = depend_hash
-        _info('%s was modified, rescheduling' % self._depend_path)
+        _info('%s was modified, rescheduling' % (
+            self._depend_path.relative_to(self._target_dir)
+        ))
         self.pause()
         self._update_depend()
         self.resume()
@@ -483,17 +513,20 @@ class OnlineEvaluator(Evaluator):
             source_hash = _hash(source_path)
             if self._source_hashes[_source_path] == source_hash: return
             self._source_hashes[_source_path] = source_hash
-        _info('%s was modified, rescheduling' % source_path)
+        _info('%s was modified, rescheduling' % (
+            source_path.relative_to(self._target_dir)
+        ))
         self.pause()
         self._update_source()
         self.resume()
 
     def _update_explicits(self, explicits):
         for file_path in self._explicits.difference(explicits):
-            self._watcher.unsubscribe(Path(file_path))
+            _file_path = Path(self._target_dir, file_path)
+            self._watcher.unsubscribe(_file_path)
             del self._source_hashes[file_path]
         for file_path in explicits.difference(self._explicits):
-            _file_path = Path(file_path)
+            _file_path = Path(self._target_dir, file_path)
             self._watcher.subscribe(
                 _file_path, partial(self._event_source, _file_path)
             )
@@ -502,10 +535,11 @@ class OnlineEvaluator(Evaluator):
 
     def _update_implicits(self, implicits):
         for file_path in self._implicits.difference(implicits):
-            self._watcher.unsubscribe(Path(file_path))
+            _file_path = Path(self._target_dir, file_path)
+            self._watcher.unsubscribe(_file_path)
             del self._source_hashes[file_path]
         for file_path in implicits.difference(self._implicits):
-            _file_path = Path(file_path)
+            _file_path = Path(self._target_dir, file_path)
             self._watcher.subscribe(
                 _file_path, partial(self._event_source, _file_path)
             )
@@ -584,13 +618,20 @@ class OnlineEvaluator(Evaluator):
         ))
 
 def online(
-    agenda_path = default_agenda_path(),
-    depend_path = default_depend_path(),
-    cache_path = default_cache_path(),
-    log_path = default_log_path(),
+    target_dir,
+    agenda_path,
+    depend_path,
+    cache_path,
+    log_path,
     worker_count = default_worker_count(),
     debug = False
     ):
+
+    assert target_dir.is_absolute()
+    assert agenda_path.is_relative_to(target_dir)
+    assert depend_path.is_relative_to(target_dir)
+    assert cache_path.is_relative_to(target_dir)
+    assert log_path.is_relative_to(target_dir)
 
     # Handle logging
     logging.basicConfig(
@@ -602,12 +643,15 @@ def online(
 
     # Check agenda file path
     if not agenda_path.exists() and not agenda_path.is_file():
-        _critical('Agenda file not found: %s' % agenda_path)
+        _critical('Agenda file not found: %s' % (
+            agenda_path.relative_to(target_dir)
+        ))
         return False
 
     # Run online evaluator
     _info('Beginning of evaluation in online mode')
     evaluator = OnlineEvaluator(
+        target_dir,
         agenda_path,
         depend_path,
         cache_path,
@@ -622,10 +666,15 @@ def online(
 # Clean mode
 ###############################################################################
 def clean(
-    cache_path = default_cache_path(),
-    log_path = default_log_path(),
+    target_dir,
+    cache_path,
+    log_path,
     debug = False
     ):
+
+    assert target_dir.is_absolute()
+    assert cache_path.is_relative_to(target_dir)
+    assert log_path.is_relative_to(target_dir)
 
     def _empty_dir(dir_path):
         return len(os.listdir(dir_path)) == 0
@@ -646,17 +695,17 @@ def clean(
 
     # Remove generated files
     for file_path in reversed(sorted(cache['files'])):
-        _info('Removing %s' % file_path)
+        _info('Removing %s' % Path(file_path).relative_to(target_dir))
         os.remove(file_path)
 
     # Remove empty generated folders
     for dir_path in reversed(sorted(cache['folders'])):
         if not _empty_dir(dir_path): continue
-        _info('Removing %s' % dir_path)
+        _info('Removing %s' % Path(dir_path).relative_to(target_dir))
         os.rmdir(dir_path)
 
     # Remove cache
-    _info('Removing %s' % cache_path)
+    _info('Removing %s' % cache_path.relative_to(target_dir))
     cache = None
     os.remove(cache_path)
 

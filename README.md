@@ -91,16 +91,86 @@ from tickle import agenda
 
 def _my_workflow(target_dir):
 
-    # Make and store agenda
+    # Paths
     agenda_path = tickle_api.default_agenda_path(target_dir)
+    depend_path = tickle_api.default_depend_path(target_dir)
+    cache_path = tickle_api.default_cache_path(target_dir)
+    log_path = tickle_api.default_log_path(target_dir)
+
+    # Make and store agenda
     agenda_data = _make_agenda(target_dir)
     agenda.store(agenda_path, agenda_data)
 
     # Run tickle offline
-    cwd = Path.cwd()
-    os.chdir(target_dir)
-    success = tickle_api.offline()
-    os.chdir(cwd)
+    success = tickle_api.offline(
+        target_dir,
+        agenda_path,
+        depend_path,
+        cache_path,
+        log_path
+    )
+
+    # Done
+    return success
+```
+
+In the case of running tickle in online mode, you will need to do so async or concurrently, could look something like this:
+```Python
+import tickle.api as tickle_api
+from tickle import agenda
+
+class Runner(Thread):
+    def __init__(self):
+        super().__init__()
+        self._func = None
+        self._args = None
+        self._result = None
+
+    def run(self):
+        self._result = self._func(
+            *self._args,
+            **self._kargs
+        )
+
+    def start(self, func, *args, **kargs):
+        self._func = func
+        self._args = args
+        self._kargs = kargs
+        super().start()
+
+    def join(self):
+        super().join()
+        return self._result
+
+def _my_workflow(target_dir):
+
+    # Paths
+    agenda_path = tickle_api.default_agenda_path(target_dir)
+    depend_path = tickle_api.default_depend_path(target_dir)
+    cache_path = tickle_api.default_cache_path(target_dir)
+    log_path = tickle_api.default_log_path(target_dir)
+
+    # Make and store agenda
+    agenda_data = _make_agenda(target_dir)
+    agenda.store(agenda_path, agenda_data)
+
+    # Run tickle online
+    runner = Runner()
+    runner.start(
+        tickle_api.online,
+        target_dir,
+        agenda_path,
+        depend_path,
+        cache_path,
+        log_path
+    )
+
+    # Do other stuff, e.g. modify agenda
+    ...
+
+    # Setop the runner
+    runner.stop()
+    success = runner.join()
 
     # Done
     return success

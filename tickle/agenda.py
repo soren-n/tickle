@@ -41,6 +41,8 @@ CompiledAgenda = list[CompiledTask]
 # Functions
 ###############################################################################
 def load(agenda_path):
+    target_dir = agenda_path.parent
+
     def _compile_proc(template):
         def _compile(template):
             params = []
@@ -113,8 +115,14 @@ def load(agenda_path):
                 stage = proc_stage[task.proc],
                 description = task.desc,
                 command = procs[task.proc](**task.args),
-                inputs = { Path(input) for input in set(task.inputs) },
-                outputs = { Path(output) for output in set(task.outputs) }
+                inputs = {
+                    Path(target_dir, input)
+                    for input in set(task.inputs)
+                },
+                outputs = {
+                    Path(target_dir, output)
+                    for output in set(task.outputs)
+                }
             ))
 
         # Done

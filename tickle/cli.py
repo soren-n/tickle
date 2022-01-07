@@ -12,6 +12,7 @@ def main():
     import sys
 
     def _app(args):
+        cwd = Path.cwd()
 
         # Check if in version mode
         if args.mode == 'version':
@@ -22,26 +23,29 @@ def main():
         # Run specified mode
         if args.mode == 'offline':
             return api.offline(
-                Path(args.agenda),
-                Path(args.depend),
-                Path(args.cache),
-                Path(args.log),
+                cwd,
+                Path(cwd, args.agenda),
+                Path(cwd, args.depend),
+                Path(cwd, args.cache),
+                Path(cwd, args.log),
                 args.workers,
                 args.debug
             )
         if args.mode == 'online':
             return api.online(
-                Path(args.agenda),
-                Path(args.depend),
-                Path(args.cache),
-                Path(args.log),
+                cwd,
+                Path(cwd, args.agenda),
+                Path(cwd, args.depend),
+                Path(cwd, args.cache),
+                Path(cwd, args.log),
                 args.workers,
                 args.debug
             )
         if args.mode == 'clean':
             return api.clean(
-                Path(args.cache),
-                Path(args.log),
+                cwd,
+                Path(cwd, args.cache),
+                Path(cwd, args.log),
                 args.debug
             )
 

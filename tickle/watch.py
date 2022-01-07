@@ -15,13 +15,6 @@ class Event(Enum):
     Moved = 'Moved'
 
 ###############################################################################
-# Function
-###############################################################################
-def _resolve_path(path):
-    if path.is_absolute(): return path.resolve()
-    return Path(Path.cwd(), path).resolve()
-
-###############################################################################
 # Classes
 ###############################################################################
 class FileWatcher(FileSystemEventHandler):
@@ -33,7 +26,7 @@ class FileWatcher(FileSystemEventHandler):
         self._watch_count = {}
 
     def subscribe(self, file_path, callback):
-        _file_path = _resolve_path(file_path)
+        _file_path = file_path.resolve()
         if _file_path in self._callbacks: return
         self._callbacks[_file_path] = callback
         file_dir = _file_path.parent
@@ -45,7 +38,7 @@ class FileWatcher(FileSystemEventHandler):
         self._watch_count[file_dir] = 1
 
     def unsubscribe(self, file_path):
-        _file_path = _resolve_path(file_path)
+        _file_path = file_path.resolve()
         if _file_path not in self._callbacks: return
         del self._callbacks[_file_path]
         file_dir = _file_path.parent
@@ -64,28 +57,28 @@ class FileWatcher(FileSystemEventHandler):
         self._observer.join()
 
     def on_created(self, event):
-        src_path = _resolve_path(Path(event.src_path))
+        src_path = Path(event.src_path)
         if src_path.is_dir(): return
         if src_path not in self._callbacks: return
         logging.debug('FileWatcher.on_created(): %s' % src_path)
         self._callbacks[src_path](Event.Created)
 
     def on_modified(self, event):
-        src_path = _resolve_path(Path(event.src_path))
+        src_path = Path(event.src_path)
         if src_path.is_dir(): return
         if src_path not in self._callbacks: return
         logging.debug('FileWatcher.on_modified(): %s' % src_path)
         self._callbacks[src_path](Event.Modified)
 
     def on_moved(self, event):
-        src_path = _resolve_path(Path(event.src_path))
+        src_path = Path(event.src_path)
         if src_path.is_dir(): return
         if src_path not in self._callbacks: return
         logging.debug('FileWatcher.on_moved(): %s' % src_path)
         self._callbacks[src_path](Event.Moved)
 
     def on_deleted(self, event):
-        src_path = _resolve_path(Path(event.src_path))
+        src_path = Path(event.src_path)
         if src_path.is_dir(): return
         if src_path not in self._callbacks: return
         logging.debug('FileWatcher.on_deleted(): %s' % src_path)
