@@ -34,6 +34,9 @@ Tickle assumes that it has full control over the input and output files describe
 As such if you need to interface/overlap tickle with other systems in a workflow, it is safest that you do so modally; i.e. before tickle is run, and after it has terminated. However it should be safe to overlap your system's runtime with tickle's, iff your system only reads the generated files.
 
 # Usage
+Tickle can be used through two interfaces; the CLI and the API.
+
+## CLI
 ```
 usage: tickle [-h] [--debug] [-w WORKERS] [-a AGENDA] [-d DEPEND] [-c CACHE] [-l LOG]
               {offline,online,clean,version}
@@ -76,6 +79,34 @@ $ cd my_workflow
 $ tickle MODE
 ```
 Where `MODE` is one of offline, online, clean or version.
+
+## API
+The API is accessible in case you wish to run one of the evaluation modes as part of your workflow scripts; rather than spawning a subprocess for tickle.
+The basic setup is that your script generates an agenda, stores it, and then runs tickle through the api.
+
+For example running tickle in offline mode could look something like this:
+```Python
+import tickle.api as tickle_api
+from tickle import agenda
+
+def _my_workflow(target_dir):
+
+    # Make and store agenda
+    agenda_path = tickle_api.default_agenda_path(target_dir)
+    agenda_data = _make_agenda(target_dir)
+    agenda.store(agenda_path, agenda_data)
+
+    # Run tickle offline
+    cwd = Path.cwd()
+    os.chdir(target_dir)
+    success = tickle_api.offline()
+    os.chdir(cwd)
+
+    # Done
+    return success
+```
+
+TODO: Make full documentation for API
 
 ## The agenda file
 The agenda file is a YAML file with the follow grammar:
