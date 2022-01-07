@@ -1,4 +1,5 @@
 # External module dependencies
+from multiprocessing import cpu_count
 from functools import partial
 from pathlib import Path
 from time import sleep
@@ -29,6 +30,24 @@ def _error(msg):
 def _critical(msg):
     logging.critical(msg)
     print('[tickle] Critical: %s' % msg)
+
+###############################################################################
+# Defaults
+###############################################################################
+def default_agenda_path(dir_path = Path('./')):
+    return Path(dir_path, 'agenda.yaml')
+
+def default_depend_path(dir_path = Path('./')):
+    return Path(dir_path, 'depend.yaml')
+
+def default_cache_path(dir_path = Path('./')):
+    return Path(dir_path, 'tickle.cache')
+
+def default_log_path(dir_path = Path('./')):
+    return Path(dir_path, 'tickle.log')
+
+def default_worker_count():
+    return cpu_count() - 1
 
 ###############################################################################
 # Task graph util
@@ -371,10 +390,30 @@ class OfflineEvaluator(Evaluator):
         self._watcher.stop()
         super().stop()
 
-def _offline(agenda_path, depend_path, cache_path, worker_count):
-    _info('Beginning of evaluation in offline mode')
+def offline(
+    agenda_path = default_agenda_path(),
+    depend_path = default_depend_path(),
+    cache_path = default_cache_path(),
+    log_path = default_log_path(),
+    worker_count = default_worker_count(),
+    debug = False
+    ):
+
+    # Handle logging
+    logging.basicConfig(
+        filename = log_path,
+        encoding = 'utf-8',
+        level = 'DEBUG' if debug else 'INFO',
+        format = '%(asctime)s | %(levelname)s | %(message)s'
+    )
+
+    # Check agenda file path
+    if not agenda_path.exists() and not agenda_path.is_file():
+        _critical('Agenda file not found: ./%s' % agenda_path)
+        return False
 
     # Run offline evaluator
+    _info('Beginning of evaluation in offline mode')
     evaluator = OfflineEvaluator(
         agenda_path,
         depend_path,
@@ -544,27 +583,60 @@ class OnlineEvaluator(Evaluator):
             error.description, error.message
         ))
 
-def _online(agenda_path, depend_path, cache_path, worker_count):
-    _info('Beginning of evaluation in online mode')
+def online(
+    agenda_path = default_agenda_path(),
+    depend_path = default_depend_path(),
+    cache_path = default_cache_path(),
+    log_path = default_log_path(),
+    worker_count = default_worker_count(),
+    debug = False
+    ):
+
+    # Handle logging
+    logging.basicConfig(
+        filename = log_path,
+        encoding = 'utf-8',
+        level = 'DEBUG' if debug else 'INFO',
+        format = '%(asctime)s | %(levelname)s | %(message)s'
+    )
+
+    # Check agenda file path
+    if not agenda_path.exists() and not agenda_path.is_file():
+        _critical('Agenda file not found: %s' % agenda_path)
+        return False
 
     # Run online evaluator
+    _info('Beginning of evaluation in online mode')
     evaluator = OnlineEvaluator(
         agenda_path,
         depend_path,
         cache_path,
         worker_count
     ).start()
+    _info('End of evaluation in online mode')
 
     # Done
-    _info('End of evaluation in online mode')
     return True
 
 ###############################################################################
 # Clean mode
 ###############################################################################
-def _clean(cache_path):
+def clean(
+    cache_path = default_cache_path(),
+    log_path = default_log_path(),
+    debug = False
+    ):
+
     def _empty_dir(dir_path):
         return len(os.listdir(dir_path)) == 0
+
+    # Handle logging
+    logging.basicConfig(
+        filename = log_path,
+        encoding = 'utf-8',
+        level = 'DEBUG' if debug else 'INFO',
+        format = '%(asctime)s | %(levelname)s | %(message)s'
+    )
 
     # Load cache
     if not cache_path.exists(): return True
@@ -591,100 +663,3 @@ def _clean(cache_path):
     # Done
     _info('End of clean mode')
     return True
-
-###############################################################################
-# Main entry
-###############################################################################
-def main(args):
-
-    # Check if in version mode
-    if args.mode == 'version':
-        from . import __version__
-        print(__version__)
-        return True
-
-    # Check agenda file path
-    agenda_path = Path(args.agenda)
-    if not agenda_path.exists() and not agenda_path.is_file():
-        _critical('Agenda file not found: ./%s' % agenda_path)
-        return False
-
-    # Depend and cache file path
-    depend_path = Path(args.depend)
-    cache_path = Path(args.cache)
-
-    # Handle logging
-    logging.basicConfig(
-        filename = args.log,
-        encoding = 'utf-8',
-        level = 'DEBUG' if args.debug else 'INFO',
-        format = '%(asctime)s | %(levelname)s | %(message)s'
-    )
-
-    # Run specified mode
-    if args.mode == 'offline':
-        return _offline(agenda_path, depend_path, cache_path, args.workers)
-    if args.mode == 'online':
-        return _online(agenda_path, depend_path, cache_path, args.workers)
-    if args.mode == 'clean':
-        return _clean(cache_path)
-
-def cli():
-    from multiprocessing import cpu_count
-    import argparse
-    import sys
-
-    parser = argparse.ArgumentParser(
-        prog = 'tickle',
-        description = 'Task graph scheduling with asynchronous evaluation.',
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
-    parser.add_argument(
-        'mode', type = str,
-        choices = ['offline', 'online', 'clean', 'version'],
-        help = 'Offline mode for an inattentive evaluation mode where file modifications are ignored once tasks have been scheduled. Online mode for an attentive evaluation mode where file creations or modifications trigger a rescheduling of the task graph. Clean mode will delete all files and folders generated during offline or online evaluation. Version mode will print the tool version.'
-    )
-    parser.add_argument(
-        '--debug',
-        dest = 'debug',
-        action = 'store_true',
-        help = 'Sets debug logging level for tool messages'
-    )
-    parser.add_argument(
-        '-w', '--workers',
-        type = int,
-        dest = 'workers',
-        default = cpu_count() - 1,
-        help = 'The number of concurrent workers; defaults to the number of logical cores minus one for the main thread'
-    )
-    parser.add_argument(
-        '-a', '--agenda',
-        type = str,
-        dest = 'agenda',
-        default = 'agenda.yaml',
-        help = 'Agenda YAML file location; contains the procedure and task definitions, file path must be relative to current working directory'
-    )
-    parser.add_argument(
-        '-d', '--depend',
-        type = str,
-        dest = 'depend',
-        default = 'depend.yaml',
-        help = 'Depend YAML file location; contains a map of dynamic task dependencies, this file is optional, file path must be relative to current working directory'
-    )
-    parser.add_argument(
-        '-c', '--cache',
-        type = str,
-        dest = 'cache',
-        default = 'tickle.cache',
-        help = 'Binary cache file location; contains inter-run persistent data, file path must be relative to current working directory'
-    )
-    parser.add_argument(
-        '-l', '--log',
-        type = str,
-        dest = 'log',
-        default = 'tickle.log',
-        help = 'Log file location; contains runtime messages, file path must be relative to current working directory'
-    )
-    success = main(parser.parse_args())
-    if not success: parser.print_help()
-    sys.exit(0 if success else -1)

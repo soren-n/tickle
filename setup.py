@@ -66,7 +66,7 @@ setup(
     install_requires = REQUIRED,
     packages = find_packages(exclude = ["tests", "examples"]),
     entry_points = {
-        'console_scripts': ['tickle=tickle.main:cli'],
+        'console_scripts': ['tickle=tickle.cli:main'],
     },
     classifiers = [
         'Development Status :: 4 - Beta',
