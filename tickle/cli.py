@@ -1,8 +1,15 @@
 # External module dependencies
 from pathlib import Path
+import logging
 
 # Internal module dependencies
 from . import api
+
+###############################################################################
+# Defaults
+###############################################################################
+def default_log_path(dir_path = Path('./')):
+    return Path(dir_path, 'tickle.log')
 
 ###############################################################################
 # Main entry
@@ -20,6 +27,14 @@ def main():
             print(__version__)
             return True
 
+        # Handle logging
+        logging.basicConfig(
+            filename = Path(cwd, args.log),
+            encoding = 'utf-8',
+            level = 'DEBUG' if args.debug else 'INFO',
+            format = '%(asctime)s | %(levelname)s | %(message)s'
+        )
+
         # Run specified mode
         if args.mode == 'offline':
             return api.offline(
@@ -27,9 +42,7 @@ def main():
                 Path(cwd, args.agenda),
                 Path(cwd, args.depend),
                 Path(cwd, args.cache),
-                Path(cwd, args.log),
-                args.workers,
-                args.debug
+                args.workers
             )
         if args.mode == 'online':
             return api.online(
@@ -37,16 +50,12 @@ def main():
                 Path(cwd, args.agenda),
                 Path(cwd, args.depend),
                 Path(cwd, args.cache),
-                Path(cwd, args.log),
-                args.workers,
-                args.debug
+                args.workers
             )
         if args.mode == 'clean':
             return api.clean(
                 cwd,
-                Path(cwd, args.cache),
-                Path(cwd, args.log),
-                args.debug
+                Path(cwd, args.cache)
             )
 
     parser = argparse.ArgumentParser(
@@ -97,7 +106,7 @@ def main():
         '-l', '--log',
         type = str,
         dest = 'log',
-        default = api.default_log_path(),
+        default = default_log_path(),
         help = 'Log file location; contains runtime messages, file path must be relative to current working directory'
     )
     success = _app(parser.parse_args())

@@ -43,9 +43,6 @@ def default_depend_path(dir_path = Path('./')):
 def default_cache_path(dir_path = Path('./')):
     return Path(dir_path, 'tickle.cache')
 
-def default_log_path(dir_path = Path('./')):
-    return Path(dir_path, 'tickle.log')
-
 def default_worker_count():
     return cpu_count() - 1
 
@@ -404,24 +401,13 @@ def offline(
     agenda_path,
     depend_path,
     cache_path,
-    log_path,
-    worker_count = default_worker_count(),
-    debug = False
+    worker_count = default_worker_count()
     ):
 
     assert target_dir.is_absolute()
     assert agenda_path.is_relative_to(target_dir)
     assert depend_path.is_relative_to(target_dir)
     assert cache_path.is_relative_to(target_dir)
-    assert log_path.is_relative_to(target_dir)
-
-    # Handle logging
-    logging.basicConfig(
-        filename = log_path,
-        encoding = 'utf-8',
-        level = 'DEBUG' if debug else 'INFO',
-        format = '%(asctime)s | %(levelname)s | %(message)s'
-    )
 
     # Check agenda file path
     if not agenda_path.exists() and not agenda_path.is_file():
@@ -622,24 +608,13 @@ def online(
     agenda_path,
     depend_path,
     cache_path,
-    log_path,
-    worker_count = default_worker_count(),
-    debug = False
+    worker_count = default_worker_count()
     ):
 
     assert target_dir.is_absolute()
     assert agenda_path.is_relative_to(target_dir)
     assert depend_path.is_relative_to(target_dir)
     assert cache_path.is_relative_to(target_dir)
-    assert log_path.is_relative_to(target_dir)
-
-    # Handle logging
-    logging.basicConfig(
-        filename = log_path,
-        encoding = 'utf-8',
-        level = 'DEBUG' if debug else 'INFO',
-        format = '%(asctime)s | %(levelname)s | %(message)s'
-    )
 
     # Check agenda file path
     if not agenda_path.exists() and not agenda_path.is_file():
@@ -667,25 +642,14 @@ def online(
 ###############################################################################
 def clean(
     target_dir,
-    cache_path,
-    log_path,
-    debug = False
+    cache_path
     ):
 
     assert target_dir.is_absolute()
     assert cache_path.is_relative_to(target_dir)
-    assert log_path.is_relative_to(target_dir)
 
     def _empty_dir(dir_path):
         return len(os.listdir(dir_path)) == 0
-
-    # Handle logging
-    logging.basicConfig(
-        filename = log_path,
-        encoding = 'utf-8',
-        level = 'DEBUG' if debug else 'INFO',
-        format = '%(asctime)s | %(levelname)s | %(message)s'
-    )
 
     # Load cache
     if not cache_path.exists(): return True
