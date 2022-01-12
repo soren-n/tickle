@@ -59,7 +59,7 @@ def _hash(file_path):
     with file_path.open('rb') as file:
         return hashlib.md5(file.read()).hexdigest()
 
-def _make_graph(agenda_data, cache):
+def _make_graph(cwd_path, agenda_data, cache):
     def _make_dirs(dir_path):
         for parent_path in reversed(dir_path.parents):
             try:
@@ -83,7 +83,8 @@ def _make_graph(agenda_data, cache):
         result = subprocess.run(
             task_data.command,
             capture_output = True,
-            text = True
+            text = True,
+            cwd = cwd_path
         )
 
         # Check for failed evaluation
@@ -337,6 +338,7 @@ class OfflineEvaluator(Evaluator):
         super().__init__(worker_count)
         self._target_dir = target_dir
         self._depend_path = depend_path
+        self._host_path = agenda_path.parent
 
         # Setup cache and file watcher
         self._cache = Cache(cache_path)
@@ -344,7 +346,11 @@ class OfflineEvaluator(Evaluator):
 
         # Initial load of agenda
         self._agenda_data = agenda.load(agenda_path)
-        self._tasks = _make_graph(self._agenda_data, self._cache)
+        self._tasks = _make_graph(
+            self._host_path,
+            self._agenda_data,
+            self._cache
+        )
 
         # Add a terminating task to graph
         end_stage = max(task_data.stage for task_data in self._agenda_data) + 1
@@ -451,6 +457,7 @@ class OnlineEvaluator(Evaluator):
         self._target_dir = target_dir
         self._agenda_path = agenda_path
         self._depend_path = depend_path
+        self._host_path = agenda_path.parent
 
         # Setup cache and file watcher
         self._cache = Cache(cache_path)
@@ -551,7 +558,11 @@ class OnlineEvaluator(Evaluator):
         )
 
         # Remake graph and schedule
-        self._tasks = _make_graph(self._agenda_data, self._cache)
+        self._tasks = _make_graph(
+            self._host_path,
+            self._agenda_data,
+            self._cache
+        )
         implicits, self._closures = _update_depend(
             self._agenda_data,
             self._depend_data,
