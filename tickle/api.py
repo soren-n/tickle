@@ -338,7 +338,6 @@ class OfflineEvaluator(Evaluator):
         super().__init__(worker_count)
         self._target_dir = target_dir
         self._depend_path = depend_path
-        self._host_path = agenda_path.parent
 
         # Setup cache and file watcher
         self._cache = Cache(cache_path)
@@ -347,7 +346,7 @@ class OfflineEvaluator(Evaluator):
         # Initial load of agenda
         self._agenda_data = agenda.load(agenda_path)
         self._tasks = _make_graph(
-            self._host_path,
+            self._target_dir,
             self._agenda_data,
             self._cache
         )
@@ -457,7 +456,6 @@ class OnlineEvaluator(Evaluator):
         self._target_dir = target_dir
         self._agenda_path = agenda_path
         self._depend_path = depend_path
-        self._host_path = agenda_path.parent
 
         # Setup cache and file watcher
         self._cache = Cache(cache_path)
@@ -559,7 +557,7 @@ class OnlineEvaluator(Evaluator):
 
         # Remake graph and schedule
         self._tasks = _make_graph(
-            self._host_path,
+            self._target_dir,
             self._agenda_data,
             self._cache
         )
