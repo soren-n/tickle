@@ -10,14 +10,14 @@ def decode(T, value):
     def _simple(T, value):
         S = type(value)
         if T == S: return value
-        raise TypeError('Expected a type of %s but got %s' % (
-            T.__name__, S.__name__
+        raise TypeError('Expected a type of %s but got %s for value \"%s\"' % (
+            T.__name__, S.__name__, str(value)
         ))
 
     def _list(T, value):
         if not isinstance(value, list):
-            raise TypeError('Expected a type of list[T] but got %s' % (
-                type(value).__name__
+            raise TypeError('Expected a type of list[T] but got %s for value \"%s\"' % (
+                type(value).__name__, str(value)
             ))
         args = T.__args__
         if len(args) != 1:
@@ -26,8 +26,8 @@ def decode(T, value):
 
     def _dict(T, value):
         if not isinstance(value, dict):
-            raise TypeError('Expected a type of dict[str, T] but got %s' % (
-                type(value).__name__
+            raise TypeError('Expected a type of dict[str, T] but got %s for value \"%s\"' % (
+                type(value).__name__, str(value)
             ))
         args = T.__args__
         if len(args) != 2:
@@ -53,8 +53,8 @@ def decode(T, value):
 
     if not is_dataclass(T): return _intrinsic(T, value)
     if not isinstance(value, dict):
-        raise TypeError('Expected a type of dict but got %s' % (
-            type(value).__name__
+        raise TypeError('Expected a type of dict but got %s for value \"%s\"' % (
+            type(value).__name__, str(value)
         ))
     result = {}
     for l, t in signature(T).parameters.items():
@@ -64,33 +64,33 @@ def decode(T, value):
     return T(**result)
 
 def encode(T, value):
-    def _simpl(T, value):
+    def _simple(T, value):
         S = type(value)
         if T == S: return value
-        raise TypeError('Expected a type of %s but got %s' % (
-            T.__name__, S.__name__
+        raise TypeError('Expected a type of %s but got %s for value \"%s\"' % (
+            T.__name__, S.__name__, str(value)
         ))
 
     def _list(T, value):
         if not isinstance(value, list):
-            raise TypeError('Expected a type of list[T] but got %s' % (
-                type(value).__name__
+            raise TypeError('Expected a type of list[T] but got %s for value \"%s\"' % (
+                type(value).__name__, str(value)
             ))
         args = T.__args__
         if len(args) != 1:
             raise TypeError('Expected list type to have exactly one parameter')
-        return [ decode(args[0], item) for item in value ]
+        return [ encode(args[0], item) for item in value ]
 
     def _dict(T, value):
         if not isinstance(value, dict):
-            raise TypeErro('Expected a type of dict[str, T] but got %s' % (
-                type(value).__name__
+            raise TypeErro('Expected a type of dict[str, T] but got %s for value \"%s\"' % (
+                type(value).__name__, str(value)
             ))
         args = T.__args__
         if len(args) != 2:
             raise TypeError('Expected dict type to have exactly two parameters')
         if args[0] != str:
-            raise TypeError('Expected type type to be str but got %s' % (
+            raise TypeError('Expected type to be str but got %s' % (
                 args[0].__name__
             ))
         for key in value.keys():
@@ -98,7 +98,7 @@ def encode(T, value):
             raise TypeError('Expected key %s to be of type %s but got %s' % (
                 key, str.__name__, type(key).__name__
             ))
-        return { k: decode(args[1], v) for k, v in value.items() }
+        return { k: encode(args[1], v) for k, v in value.items() }
 
     def _intrinsic(T, value):
         if T in [str, int, float]: return _simple(T, value)

@@ -136,4 +136,10 @@ def store(agenda_path, agenda_data):
     assert isinstance(agenda_data, Agenda)
     with agenda_path.open('w+') as agenda_file:
         raw_data = dataspec.encode(Agenda, agenda_data)
-        yaml.dump(raw_data, agenda_file)
+        yaml.dump(
+            raw_data,
+            agenda_file,
+            width = 80,
+            indent = 2,
+            default_flow_style = False
+        )
