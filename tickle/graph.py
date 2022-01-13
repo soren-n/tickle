@@ -22,7 +22,10 @@ def has_cycle(worklist):
         visited.add(task)
     return False
 
-def leafs(graph):
+def get_leafs(graph):
+    return list(filter(lambda node: len(deps(node)) == 0, graph))
+
+def get_roots(graph):
     return list(filter(lambda node: len(refs(node)) == 0, graph))
 
 def propagate(graph):
@@ -30,21 +33,23 @@ def propagate(graph):
         result = list()
         while len(worklist) != 0:
             node = worklist.pop(0)
-            if node in result: continue
+            result_set = set(result)
+            if node in result_set: continue
+            if len(deps(node).difference(result_set)) != 0: continue
+            worklist += refs(node).difference(result_set)
             result.append(node)
-            worklist += deps(node)
         return result
 
     # Defensively check for cycles
-    worklist = leafs(graph)
+    worklist = get_leafs(graph)
     if has_cycle(worklist[:]):
         raise RuntimeError('Cycle detected in agenda!')
 
     # Propagate invalidity
     for dst in __topological_order(worklist):
-        for src in deps(dst):
-            if src.get_valid(): continue
-            dst.set_valid(False)
+        for src in refs(dst):
+            if not src.get_valid(): dst.set_valid(False)
+            if not src.get_active(): dst.set_active(False)
 
 def compile(graph):
 
@@ -55,12 +60,13 @@ def compile(graph):
             task = worklist.pop(0)
             if task in result: continue
             if task.get_valid(): continue
+            if not task.get_active(): continue
             result.append(task)
             worklist += deps(task)
         return list(reversed(result))
 
     # Find initial tasks
-    def __find_roots(worklist, alive):
+    def __find_leafs(worklist, alive):
         result = list()
         visited = set()
         while len(worklist) != 0:
@@ -156,7 +162,7 @@ def compile(graph):
             stage_groups = groups_by_stage[stage]
             stage_alive = alive_by_stage[stage]
             worklist = [group[0] for group in stage_groups]
-            roots_by_stage[stage] = __find_roots(worklist, stage_alive)
+            roots_by_stage[stage] = __find_leafs(worklist, stage_alive)
 
         # Find batches of each stage
         result = list()
@@ -168,10 +174,10 @@ def compile(graph):
         # Done
         return result
 
-    targets = leafs(graph)
+    targets = get_roots(graph)
     if has_cycle(targets[:]):
         raise RuntimeError('Cycle detected in agenda!')
     alive = __reachable_alive(targets[:])
-    roots = __find_roots(targets[:], alive)
+    roots = __find_leafs(targets[:], alive)
     groups, group_map = __join_tasks(roots[:], alive)
     return __parallel_ordering(groups, group_map)

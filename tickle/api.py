@@ -92,7 +92,7 @@ def _make_graph(cwd_path, agenda_data, cache):
             raise TaskError(task_data.description, result.stderr)
 
         # Update cached hashes
-        for input in cache['hashes'][task_name].keys():
+        for input in list(cache['hashes'][task_name].keys()):
             cache['hashes'][task_name][input] = _hash_wait(Path(input))
         cache['files'] = set.union(cache['files'], {
             str(output) for output in task_data.outputs
@@ -244,7 +244,42 @@ def _update_depend(
     implicits = set(alive).difference(_explicits(agenda_data))
     return implicits, depend_closures
 
-def _make_schedule(tasks, agenda_data, depend_closures, cache):
+def _make_schedule(target_dir, tasks, agenda_data, depend_closures, cache):
+    def _task_index_graph(nodes, node_count):
+        result = dict()
+        for index, node in enumerate(nodes):
+            if index >= node_count: break
+            result[index] = set()
+            for dep in graph.deps(node):
+                dep_index = nodes.index(dep)
+                if dep_index >= node_count: continue
+                result[index].add(dep_index)
+        return result
+
+    def _index_graph_inverse(graph, node_count):
+        result = { dep : set() for dep in range(node_count) }
+        for node, deps in graph.items():
+            for dep in deps:
+                result[dep].add(node)
+        return result
+
+    def _index_graph_leafs(deps):
+        result = list()
+        for node, _deps in deps.items():
+            if len(_deps) != 0: continue
+            result.append(node)
+        return result
+
+    def _topological_order(worklist, deps, refs):
+        result = list()
+        while len(worklist) != 0:
+            node = worklist.pop(0)
+            result_set = set(result)
+            if node in result_set: continue
+            if len(deps[node].difference(result_set)) != 0: continue
+            worklist += refs[node].difference(result_set)
+            result.append(node)
+        return result
 
     # Clear graph progress and prepare cache
     if 'files' not in cache:
@@ -255,6 +290,7 @@ def _make_schedule(tasks, agenda_data, depend_closures, cache):
     for index, task in enumerate(tasks):
         task_name = 'task%d' % index
         task.set_valid(True)
+        task.set_active(True)
         if task_name in cache['hashes']: continue
         cache['hashes'][task_name] = {}
 
@@ -272,9 +308,38 @@ def _make_schedule(tasks, agenda_data, depend_closures, cache):
             hashes[new_task_name] = cache['hashes'][new_task_name]
     cache['hashes'] = hashes
 
-    # Check input files
+    # Disable impossible tasks
+    outputs = set()
+    task_count = len(agenda_data)
+    deps = _task_index_graph(tasks, task_count)
+    refs = _index_graph_inverse(deps, task_count)
+    leafs = _index_graph_leafs(deps)
+    for index in _topological_order(leafs, deps, refs):
+        task_data = agenda_data[index]
+
+        # Check for file existance and output generation
+        for input in task_data.inputs:
+            if input.exists(): continue
+            if str(input) in outputs: continue
+            _error('Skipping task \"%s\"' % task_data.description)
+            logging.debug(
+                'Task input \"%s\" does not exist and will not '
+                'be generated during task graph evaluation.' % (
+                    input.relative_to(target_dir)
+                )
+            )
+            tasks[index].set_active(False)
+            break
+
+        # Task is possible collect ouputs
+        outputs = set.union(outputs, {
+            str(output) for output in task_data.outputs
+        })
+
+    # Check input closure
     for index, task in enumerate(tasks):
-        if index >= len(agenda_data): continue
+        if not task.get_active(): continue
+        if index >= task_count: continue
         task_name = 'task%d' % index
         task_data = agenda_data[index]
         prev_hashes = cache['hashes'][task_name]
@@ -311,7 +376,8 @@ def _make_schedule(tasks, agenda_data, depend_closures, cache):
 
     # Check output files
     for index, task in enumerate(tasks):
-        if index >= len(agenda_data): continue
+        if not task.get_active(): continue
+        if index >= task_count: continue
         task_data = agenda_data[index]
 
         # Check for file existence
@@ -387,6 +453,7 @@ class OfflineEvaluator(Evaluator):
             self._cache
         )
         self.reprogram(_make_schedule(
+            self._target_dir,
             self._tasks,
             self._agenda_data,
             closures,
@@ -569,6 +636,7 @@ class OnlineEvaluator(Evaluator):
         )
         self._update_implicits(implicits)
         self.reprogram(_make_schedule(
+            self._target_dir,
             self._tasks,
             self._agenda_data,
             self._closures,
@@ -585,6 +653,7 @@ class OnlineEvaluator(Evaluator):
         )
         self._update_implicits(implicits)
         self.reprogram(_make_schedule(
+            self._target_dir,
             self._tasks,
             self._agenda_data,
             self._closures,
@@ -593,6 +662,7 @@ class OnlineEvaluator(Evaluator):
 
     def _update_source(self):
         self.reprogram(_make_schedule(
+            self._target_dir,
             self._tasks,
             self._agenda_data,
             self._closures,

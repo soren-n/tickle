@@ -23,11 +23,12 @@ class TaskError(Exception):
 class Task:
     def __init__(self, stage, work, force = False):
         self._valid = False
+        self._active = True
+        self._force = force
         self._deps = set()
         self._refs = set()
         self._stage = stage
         self._work = work
-        self._force = force
 
     def __hash__(self):
         return hash(id(self))
@@ -41,6 +42,13 @@ class Task:
 
     def set_valid(self, valid):
         self._valid = valid
+
+    def get_active(self):
+        if self._force: return True
+        return self._active
+
+    def set_active(self, active):
+        self._active = active
 
     def add_dependency(self, other):
         if self._stage < other._stage:
