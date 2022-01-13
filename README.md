@@ -1,5 +1,5 @@
 [![GitHub](https://img.shields.io/github/license/soren-n/tickle)](https://github.com/soren-n/tickle/blob/main/LICENSE)
-[![PyPI](https://img.shields.io/pypi/v/tickle-soren-n)](https://pypi.org/project/tickle-soren-n/)
+[![PyPI](https://img.shields.io/pypi/v/tickle-soren-n) ![PyPI - Downloads](https://img.shields.io/pypi/dm/tickle-soren-n)](https://pypi.org/project/tickle-soren-n/)
 [![GitHub Sponsors](https://img.shields.io/github/sponsors/soren-n)](https://github.com/sponsors/soren-n)
 
 # tickle
