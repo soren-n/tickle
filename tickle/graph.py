@@ -47,7 +47,7 @@ def propagate(graph):
 
     # Propagate invalidity
     for dst in __topological_order(worklist):
-        for src in refs(dst):
+        for src in deps(dst):
             if not src.get_valid(): dst.set_valid(False)
             if not src.get_active(): dst.set_active(False)
 

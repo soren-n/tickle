@@ -338,7 +338,6 @@ def _make_schedule(target_dir, tasks, agenda_data, depend_closures, cache):
 
     # Check input closure
     for index, task in enumerate(tasks):
-        if not task.get_active(): continue
         if index >= task_count: continue
         task_name = 'task%d' % index
         task_data = agenda_data[index]
@@ -376,7 +375,6 @@ def _make_schedule(target_dir, tasks, agenda_data, depend_closures, cache):
 
     # Check output files
     for index, task in enumerate(tasks):
-        if not task.get_active(): continue
         if index >= task_count: continue
         task_data = agenda_data[index]
 
