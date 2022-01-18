@@ -79,6 +79,11 @@ def _make_graph(cwd_path, agenda_data, cache):
         for output_path in task_data.outputs:
             _make_dirs(output_path)
 
+        # Track generated files
+        cache['files'] = set.union(cache['files'], {
+            str(output) for output in task_data.outputs
+        })
+
         # Evaluate task command
         result = subprocess.run(
             task_data.command,
@@ -89,14 +94,12 @@ def _make_graph(cwd_path, agenda_data, cache):
 
         # Check for failed evaluation
         if result.returncode != 0:
+            cache.flush()
             raise TaskError(task_data.description, result.stderr)
 
         # Update cached hashes
         for input in list(cache['hashes'][task_name].keys()):
             cache['hashes'][task_name][input] = _hash_wait(Path(input))
-        cache['files'] = set.union(cache['files'], {
-            str(output) for output in task_data.outputs
-        })
         cache.flush()
 
         # Done
@@ -740,11 +743,13 @@ def clean(
 
     # Remove generated files
     for file_path in reversed(sorted(cache['files'])):
+        if not os.path.exists(file_path): continue
         _info('Removing %s' % Path(file_path).relative_to(target_dir))
         os.remove(file_path)
 
     # Remove empty generated folders
     for dir_path in reversed(sorted(cache['folders'])):
+        if not os.path.exists(dir_path): continue
         if not _empty_dir(dir_path): continue
         _info('Removing %s' % Path(dir_path).relative_to(target_dir))
         os.rmdir(dir_path)
