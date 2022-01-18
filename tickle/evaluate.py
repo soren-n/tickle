@@ -52,7 +52,9 @@ class Task:
 
     def add_dependency(self, other):
         if self._stage < other._stage:
-            raise RuntimeErro('Tasks can not depend on tasks of later stages!')
+            raise RuntimeError(
+                'Tasks can not depend on tasks of later stages!'
+            )
         self._deps.add(other)
         other._refs.add(self)
 
