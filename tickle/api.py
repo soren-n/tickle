@@ -195,7 +195,11 @@ def _update_depend(
         return result
 
     def _leafs(nodes, graph):
-        return list(filter(lambda node: node not in graph, nodes))
+        def _is_leaf(node):
+            if node not in graph: return True
+            if len(graph[node]) == 0: return True
+            return False
+        return list(filter(_is_leaf, nodes))
 
     def _inverse_graph_alive(alive, graph):
         result = dict()
