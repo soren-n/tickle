@@ -21,20 +21,20 @@ class TaskError(Exception):
 # Classes
 ###############################################################################
 class Task:
-    def __init__(self, stage, work, force = False):
+    def __init__(self, flows, work, force = False):
         self._valid = False
         self._active = True
         self._force = force
         self._deps = set()
         self._refs = set()
-        self._stage = stage
+        self._flows = flows
         self._work = work
 
     def __hash__(self):
         return hash(id(self))
 
-    def get_stage(self):
-        return self._stage
+    def get_flows(self):
+        return self._flows
 
     def get_valid(self):
         if self._force: return False
@@ -51,9 +51,12 @@ class Task:
         self._active = active
 
     def add_dependency(self, other):
-        if self._stage < other._stage:
+        for flow, stage in self._flows.items():
+            if flow not in other._flows: continue
+            if stage >= other._flows[flow]: continue
             raise RuntimeError(
-                'Tasks can not depend on tasks of later stages!'
+                'Tasks can not depend on tasks of '
+                'later stages in the same workflow!'
             )
         self._deps.add(other)
         other._refs.add(self)

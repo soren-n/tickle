@@ -54,7 +54,7 @@ def propagate(graph):
 def compile(graph):
 
     # Find tasks that needs to be performed
-    def __reachable_alive(worklist):
+    def _reachable_alive(worklist):
         result = list()
         while len(worklist) != 0:
             task = worklist.pop(0)
@@ -66,7 +66,7 @@ def compile(graph):
         return list(reversed(result))
 
     # Find initial tasks
-    def __find_leafs(worklist, alive):
+    def _find_leafs(worklist, alive):
         result = list()
         visited = set()
         while len(worklist) != 0:
@@ -79,14 +79,21 @@ def compile(graph):
             else: worklist += alive_deps
         return result
 
-    # Join sequential tasks into groups
-    def __join_tasks(worklist, alive):
+    # Join sequential tasks
+    def _join_tasks(worklist, alive):
         def _should_join(task, alive_deps):
             if len(alive_deps) != 1: return False
-            return alive_deps[0].get_stage() == task.get_stage()
+            dep = alive_deps[0]
+            if len(refs(dep).intersection(alive)) != 1: return False
+            dep_flows = dep.get_flows()
+            for flow, stage in task.get_flows().items():
+                if flow not in dep_flows: continue
+                if stage == dep_flows[flow]: continue
+                return False
+            return True
 
         result = list()
-        groups = dict()
+        seqs = dict()
         visited = set()
         while len(worklist) != 0:
             task = worklist.pop(0)
@@ -95,89 +102,176 @@ def compile(graph):
             worklist += refs(task).intersection(alive)
             alive_deps = list(deps(task).intersection(alive))
             if _should_join(task, alive_deps):
-                index = groups[alive_deps[0]]
+                index = seqs[alive_deps[0]]
                 result[index].append(task)
-                groups[task] = index
+                seqs[task] = index
             else:
                 index = len(result)
                 result.append([task])
-                groups[task] = index
-        return result, groups
+                seqs[task] = index
+        return result, seqs
 
-    # Sort task groups in topological order
-    def __parallel_ordering(groups, group_map):
-        def _add_work(worklist, work):
-            if len(groups) == 0: return
-            for item in work:
-                if item in worklist: continue
-                worklist.append(item)
-            worklist.sort(key = lambda group: groups[group][0].get_stage())
+    # Sort task seqs in topological order
+    def _parallel_ordering(seqs, seq_map):
+        def _stage_batches(leafs, alive):
+            def _seq_refs(seq, alive):
+                last = seqs[seq][-1]
+                alive_refs = refs(last).intersection(alive)
+                return set( seq_map[ref] for ref in alive_refs )
 
-        def __group_refs(group, alive):
-            last = groups[group][-1]
-            alive_refs = refs(last).intersection(alive)
-            return set( group_map[ref] for ref in alive_refs )
+            def _seq_deps(seq, alive):
+                first = seqs[seq][0]
+                alive_deps = deps(first).intersection(alive)
+                return set( seq_map[dep] for dep in alive_deps )
 
-        def __group_deps(group, alive):
-            first = groups[group][0]
-            alive_deps = deps(first).intersection(alive)
-            return set( group_map[dep] for dep in alive_deps )
+            def _add_work(worklist, work):
+                if len(work) == 0: return
+                for item in work:
+                    if item in worklist: continue
+                    worklist.append(item)
 
-        def __parallel_batches(roots, alive):
             result = dict()
             batches = dict()
             visited = set()
             worklist = list()
-            _add_work(worklist, set( group_map[root] for root in roots ))
+            _add_work(worklist, set( seq_map[leaf] for leaf in leafs ))
             while len(worklist) != 0:
-                group = worklist.pop(0)
-                if group in visited: continue
-                group_deps = __group_deps(group, alive)
-                if len(group_deps.difference(visited)) != 0: continue
-                visited.add(group)
-                _add_work(worklist, __group_refs(group, alive))
-                batch = max([-1] + [ batches[dep] for dep in group_deps ]) + 1
+                seq = worklist.pop(0)
+                if seq in visited: continue
+                seq_deps = _seq_deps(seq, alive)
+                if len(seq_deps.difference(visited)) != 0: continue
+                visited.add(seq)
+                _add_work(worklist, _seq_refs(seq, alive))
+                batch = max([-1] + [batches[dep] for dep in seq_deps]) + 1
                 if batch not in result: result[batch] = set()
-                result[batch].add(group)
-                batches[group] = batch
+                result[batch].add(seq)
+                batches[seq] = batch
             return [
-                [ groups[group] for group in result[batch] ]
+                [ seqs[seq] for seq in result[batch] ]
                 for batch in range(len(result))
             ]
 
-        # Sort by stage
-        alive_by_stage = dict()
-        groups_by_stage = dict()
-        for group in groups:
-            stage = group[0].get_stage()
-            if stage not in alive_by_stage:
-                alive_by_stage[stage] = set()
-                groups_by_stage[stage] = list()
-            alive_by_stage[stage] = alive_by_stage[stage].union(set(group))
-            groups_by_stage[stage].append(group)
+        def _uid_deps(seq, uid_by_seq, alive):
+            return {
+                uid_by_seq[id(seqs[seq_map[node]])]
+                for node in deps(seq[0]).intersection(alive)
+            }
 
-        # Roots of each stage
-        roots_by_stage = dict()
-        for stage in alive_by_stage.keys():
-            stage_groups = groups_by_stage[stage]
-            stage_alive = alive_by_stage[stage]
-            worklist = [group[0] for group in stage_groups]
-            roots_by_stage[stage] = __find_leafs(worklist, stage_alive)
+        def _uid_refs(seq, uid_by_seq, alive):
+            return {
+                uid_by_seq[id(seqs[seq_map[node]])]
+                for node in refs(seq[-1]).intersection(alive)
+            }
 
-        # Find batches of each stage
-        result = list()
-        for stage in sorted(list(alive_by_stage.keys())):
-            stage_roots = roots_by_stage[stage]
-            stage_alive = alive_by_stage[stage]
-            result += __parallel_batches(stage_roots, stage_alive)
+        def _combine_batches(batches_by_flow):
+            def _leafs(graph):
+                result = list()
+                for src, dsts in graph.items():
+                    if len(dsts) != 0: continue
+                    result.append(src)
+                return result
 
-        # Done
-        return result
+            def _add_work(worklist, work):
+                if len(work) == 0: return
+                for item in work:
+                    if item in worklist: continue
+                    worklist.append(item)
+
+            def _batches(worklist, deps, refs):
+                result = dict()
+                batches = dict()
+                visited = set()
+                while len(worklist) != 0:
+                    node = worklist.pop(0)
+                    if node in visited: continue
+                    node_deps = deps[node]
+                    if len(node_deps.difference(visited)) != 0: continue
+                    visited.add(node)
+                    _add_work(worklist, refs[node])
+                    batch = max([-1] + [batches[dep] for dep in node_deps]) + 1
+                    if batch not in result: result[batch] = set()
+                    result[batch].add(node)
+                    batches[node] = batch
+                return [ result[batch] for batch in range(len(result)) ]
+
+            # Assign each seq an id
+            uid_by_seq = { id(seq) : uid for uid, seq in enumerate(seqs) }
+            graph_deps = dict()
+            graph_refs = dict()
+            alive = set(seq_map.keys())
+            for uid, seq in enumerate(seqs):
+                graph_deps[uid] = _uid_deps(seq, uid_by_seq, alive)
+                graph_refs[uid] = _uid_refs(seq, uid_by_seq, alive)
+
+            # Build seq graph
+            for batches in batches_by_flow.values():
+                prev_ids = None
+                for batch in batches:
+                    curr_ids = { uid_by_seq[id(seq)] for seq in batch }
+                    if prev_ids is None: prev_ids = curr_ids; continue
+                    for curr_id in curr_ids:
+                        curr_deps = graph_deps[curr_id]
+                        graph_deps[curr_id] = curr_deps.union(prev_ids)
+                    for prev_id in prev_ids:
+                        prev_refs = graph_refs[prev_id]
+                        graph_refs[prev_id] = prev_refs.union(curr_ids)
+                    prev_ids = curr_ids
+
+            # Rebuild combined batches
+            leafs = _leafs(graph_deps)
+            batches = _batches(leafs[:], graph_deps, graph_refs)
+            return [
+                [ seqs[uid] for uid in batch ]
+                for batch in batches
+            ]
+
+        # Sort by flow
+        seqs_by_flow = dict()
+        for seq in seqs:
+            for flow in seq[0].get_flows().keys():
+                if flow not in seqs_by_flow: seqs_by_flow[flow] = list()
+                seqs_by_flow[flow].append(seq)
+
+        # Find batches for each flow separately
+        batches_by_flow = dict()
+        for flow in seqs_by_flow.keys():
+
+            # Sort by stage
+            alive_by_stage = dict()
+            seq_by_stage = dict()
+            for seq in seqs_by_flow[flow]:
+                stage = seq[0].get_flows()[flow]
+                if stage not in alive_by_stage:
+                    alive_by_stage[stage] = set()
+                    seq_by_stage[stage] = list()
+                alive_by_stage[stage] = alive_by_stage[stage].union(set(seq))
+                seq_by_stage[stage].append(seq)
+
+            # Roots of each stage
+            leafs_by_stage = dict()
+            for stage in alive_by_stage.keys():
+                stage_seq = seq_by_stage[stage]
+                stage_alive = alive_by_stage[stage]
+                worklist = [ seq[0] for seq in stage_seq ]
+                leafs_by_stage[stage] = _find_leafs(worklist, stage_alive)
+
+            # Find batches of each stage
+            batches = list()
+            for stage in sorted(list(alive_by_stage.keys())):
+                stage_leafs = leafs_by_stage[stage]
+                stage_alive = alive_by_stage[stage]
+                batches += _stage_batches(stage_leafs, stage_alive)
+
+            # Set batches for flow
+            batches_by_flow[flow] = batches
+
+        # Combine batches
+        return _combine_batches(batches_by_flow)
 
     targets = get_roots(graph)
     if has_cycle(targets[:]):
         raise RuntimeError('Cycle detected in agenda!')
-    alive = __reachable_alive(targets[:])
-    roots = __find_leafs(targets[:], alive)
-    groups, group_map = __join_tasks(roots[:], alive)
-    return __parallel_ordering(groups, group_map)
+    alive = _reachable_alive(targets[:])
+    roots = _find_leafs(targets[:], alive)
+    seqs, seq_map = _join_tasks(roots[:], alive)
+    return _parallel_ordering(seqs, seq_map)

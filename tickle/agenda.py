@@ -16,6 +16,7 @@ from . import dataspec
 class Task:
     desc: str
     proc: str
+    flows: list[str]
     args: dict[str, list[str]]
     inputs: list[str]
     outputs: list[str]
@@ -23,14 +24,14 @@ class Task:
 @dataclass
 class Agenda:
     procs: dict[str, list[str]] = field(default_factory = dict)
-    stages: list[list[str]] = field(default_factory = list)
+    flows: dict[str, list[list[str]]] = field(default_factory = dict)
     tasks: list[Task] = field(default_factory = list)
 
 @dataclass
 class CompiledTask:
     hash: int
-    stage: int
     description: str
+    flows: dict[str, int]
     command: list[str]
     inputs: set[Path]
     outputs: set[Path]
@@ -72,12 +73,13 @@ def load(agenda_path):
 
         return _apply
 
-    def _task_hash(task):
+    def _task_hash(task_data):
         data = json.dumps({
-            'proc': task.proc,
-            'args': task.args,
-            'inputs': list(sorted(task.inputs)),
-            'outputs': list(sorted(task.outputs))
+            'proc': task_data.proc,
+            'args': task_data.args,
+            'flows': list(sorted(task_data.flows)),
+            'inputs': list(sorted(task_data.inputs)),
+            'outputs': list(sorted(task_data.outputs))
         }, sort_keys = True)
         return hashlib.md5(data.encode('utf-8')).hexdigest()
 
@@ -89,39 +91,53 @@ def load(agenda_path):
             for name, proc in agenda_data.procs.items()
         }
 
-        # Stage to proc mapping
-        proc_stage = dict()
-        for index, stage in enumerate(agenda_data.stages):
-            for proc in stage:
-                if proc not in procs:
-                    raise RuntimeError('Undefined proc \"%s\" in stage %d' % (
-                        proc, index + 1
-                    ))
-                if proc in proc_stage:
-                    raise RuntimeError('Proc \"%s\" reserved for stage %d' % (
-                        proc, proc_stage[proc] + 1
-                    ))
-                proc_stage[proc] = index
+        # Flow and stage to proc mapping
+        flow_proc_stage = dict()
+        for flow in agenda_data.flows:
+            if flow not in flow_proc_stage: flow_proc_stage[flow] = dict()
+            for index, stage in enumerate(agenda_data.flows[flow]):
+                for proc in stage:
+                    if proc not in procs:
+                        raise RuntimeError(
+                            'Undefined proc \"%s\" in stage %d of flow %s' % (
+                                proc, index + 1, flow
+                            )
+                        )
+                    if proc in flow_proc_stage[flow]:
+                        raise RuntimeError(
+                            'Proc \"%s\" reserved for stage %d of flow %s' % (
+                                proc, proc_stage[proc] + 1, flow
+                            )
+                        )
+                    flow_proc_stage[flow][proc] = index
 
         # Parse tasks
         agenda = list()
-        for task in agenda_data.tasks:
-            if task.proc not in procs:
+        for task_data in agenda_data.tasks:
+            if task_data.proc not in procs:
                 raise RuntimeError('Undefined proc \"%s\" for task \"%s\"' % (
-                    task.proc, task.desc
+                    task_data.proc, task_data.desc
                 ))
+            for flow in task_data.flows:
+                if flow not in flow_proc_stage:
+                    raise RuntimeError('Undefined flow \"%s\" for task \"\"' % (
+                        flow, task_data.desc
+                    ))
             agenda.append(CompiledTask(
-                hash = _task_hash(task),
-                stage = proc_stage[task.proc],
-                description = task.desc,
-                command = procs[task.proc](**task.args),
+                hash = _task_hash(task_data),
+                description = task_data.desc,
+                flows = {
+                    flow : flow_proc_stage[flow][task_data.proc]
+                    for flow in task_data.flows
+                },
+                command = procs[task_data.proc](**task_data.args),
                 inputs = {
                     Path(target_dir, input)
-                    for input in set(task.inputs)
+                    for input in set(task_data.inputs)
                 },
                 outputs = {
                     Path(target_dir, output)
-                    for output in set(task.outputs)
+                    for output in set(task_data.outputs)
                 }
             ))
 

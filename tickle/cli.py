@@ -110,5 +110,4 @@ def main():
         help = 'Log file location; contains runtime messages, file path must be relative to current working directory'
     )
     success = _app(parser.parse_args())
-    if not success: parser.print_help()
     sys.exit(0 if success else -1)

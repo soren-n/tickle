@@ -111,21 +111,26 @@ def _make_graph(cwd_path, agenda_data, cache):
     output_map = dict()
     for index, task_data in enumerate(agenda_data):
         task_name = 'task%d' % index
-        task = Task(task_data.stage, partial(_eval_cmd, task_name, task_data))
+        task = Task(task_data.flows, partial(_eval_cmd, task_name, task_data))
         tasks.append(task)
         for file_path in task_data.outputs:
             output = str(file_path)
             if output in output_map:
                 raise RuntimeError('Multiple tasks output to %s' % output)
-            output_map[output] = task
+            output_map[output] = (task_data, task)
 
     # Define explicit dependencies
     for index, dst_node in enumerate(tasks):
-        for file_path in agenda_data[index].inputs:
+        dst_data = agenda_data[index]
+        for file_path in dst_data.inputs:
             input = str(file_path)
             if input not in output_map: continue
-            src_node = output_map[input]
-            dst_node.add_dependency(src_node)
+            src_data, src_node = output_map[input]
+            try: dst_node.add_dependency(src_node)
+            except Exception as e:
+                raise RuntimeError('%s:\n\t\"%s\" -> \"%s\"' % (
+                    str(e), dst_data.description, src_data.description
+                ))
 
     # Done
     return tasks
@@ -423,8 +428,7 @@ class OfflineEvaluator(Evaluator):
         )
 
         # Add a terminating task to graph
-        end_stage = max(task_data.stage for task_data in self._agenda_data) + 1
-        terminate_task = Task(end_stage, self.stop, True)
+        terminate_task = Task({'': 0}, self.stop, True)
         terminate_task.add_dependencies(self._tasks)
         self._tasks.append(terminate_task)
 
@@ -495,22 +499,28 @@ def offline(
 
     # Run offline evaluator
     _info('Beginning of evaluation in offline mode')
-    evaluator = OfflineEvaluator(
-        target_dir,
-        agenda_path,
-        depend_path,
-        cache_path,
-        worker_count
-    )
-    try: evaluator.start()
+    try:
+        evaluator = OfflineEvaluator(
+            target_dir,
+            agenda_path,
+            depend_path,
+            cache_path,
+            worker_count
+        )
+        evaluator.start()
     except TaskError as error:
         _critical('Task \"%s\" failed with message:\n%s' % (
             error.description, error.message
         ))
-    finally:
-        _info('End of evaluation in offline mode')
+        _info('Failed evaluation in offline mode')
+        return False
+    except RuntimeError as e:
+        _critical(str(e))
+        _info('Failed evaluation in offline mode')
+        return False
 
     # Done
+    _info('End of evaluation in offline mode')
     return True
 
 ###############################################################################
