@@ -59,16 +59,34 @@ def load(agenda_path):
 
         params, command = _compile(template)
 
+        def _split(input):
+            result = []
+            subresult = ''
+            worklist = input.split(' ')
+            while len(worklist) != 0:
+                part = worklist.pop(0)
+                if len(subresult) != 0:
+                    subresult = '%s %s' % (subresult, part)
+                    if part.endswith('\"'):
+                        result.append(subresult[1:-1])
+                        subresult = ''
+                    continue
+                if part.startswith('\"'):
+                    subresult += part
+                    continue
+                result.append(part)
+            return result
+
         def _apply(**args):
             for param in params:
                 if param in args: continue
                 raise ArgumentError('Missing argument %s' % param)
             return list(filter(
                 lambda part: part != '',
-                (command % tuple(
+                _split(command % tuple(
                     ' '.join(args[param])
                     for param in params
-                )).split(' ')
+                ))
             ))
 
         return _apply
