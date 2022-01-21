@@ -59,6 +59,13 @@ def load(agenda_path):
 
         params, command = _compile(template)
 
+        def _join(inputs):
+            def _wrap(input):
+                if ' ' not in input: return input
+                return '\"%s\"' % input
+
+            return ' '.join([ _wrap(input) for input in inputs ])
+
         def _split(input):
             result = []
             subresult = ''
@@ -84,7 +91,7 @@ def load(agenda_path):
             return list(filter(
                 lambda part: part != '',
                 _split(command % tuple(
-                    ' '.join(args[param])
+                    _join(args[param])
                     for param in params
                 ))
             ))
