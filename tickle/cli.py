@@ -1,6 +1,8 @@
 # External module dependencies
+from threading import Thread
 from pathlib import Path
 import logging
+import signal
 
 # Internal module dependencies
 from . import api
@@ -10,6 +12,32 @@ from . import api
 ###############################################################################
 def default_log_path(dir_path = Path('./')):
     return Path(dir_path, 'tickle.log')
+
+###############################################################################
+# Async runner
+###############################################################################
+class Runner(Thread):
+    def __init__(self):
+        super().__init__()
+        self._func = None
+        self._args = None
+        self._result = None
+
+    def run(self):
+        self._result = self._func(
+            *self._args,
+            **self._kargs
+        )
+
+    def start(self, func, *args, **kargs):
+        self._func = func
+        self._args = args
+        self._kargs = kargs
+        super().start()
+
+    def join(self):
+        super().join()
+        return self._result
 
 ###############################################################################
 # Main entry
@@ -45,18 +73,32 @@ def main():
                 args.workers
             )
         if args.mode == 'online':
-            return api.online(
+            evaluator = api.online(
                 cwd,
                 Path(cwd, args.agenda),
                 Path(cwd, args.depend),
                 Path(cwd, args.cache),
                 args.workers
             )
+
+            def _terminate(*args):
+                logging.info('Ctrl-C registered; terminating ...')
+                evaluator.stop()
+
+            signal.signal(signal.SIGINT, _terminate)
+            signal.signal(signal.SIGTERM, _terminate)
+
+            try: evaluator.start()
+            except Exception as e:
+                log.info('Failed evaluation in offline mode')
+                evaluator.stop()
+                log.critical(str(e))
+                return False
+
+            return True
+
         if args.mode == 'clean':
-            return api.clean(
-                cwd,
-                Path(cwd, args.cache)
-            )
+            return api.clean(cwd, Path(cwd, args.cache) )
 
     parser = argparse.ArgumentParser(
         prog = 'tickle',

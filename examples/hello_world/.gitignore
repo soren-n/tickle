@@ -36,3 +36,4 @@ exe/
 obj/
 *.bin
 *.log
+*.cache

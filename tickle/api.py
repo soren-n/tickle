@@ -15,21 +15,7 @@ from .cache import Cache
 from . import agenda
 from . import depend
 from . import graph
-
-###############################################################################
-# Logging helpers
-###############################################################################
-def _info(msg):
-    logging.info(msg)
-    print('[tickle] %s' % msg)
-
-def _error(msg):
-    logging.error(msg)
-    print('[tickle] Error: %s' % msg)
-
-def _critical(msg):
-    logging.critical(msg)
-    print('[tickle] Critical: %s' % msg)
+from . import log
 
 ###############################################################################
 # Defaults
@@ -73,7 +59,7 @@ def _make_graph(cwd_path, agenda_data, cache):
             task_data.description,
             ' '.join(task_data.command)
         ))
-        _info(task_data.description)
+        log.info(task_data.description)
 
         # Ensure output folders exists
         for output_path in task_data.outputs:
@@ -333,7 +319,7 @@ def _make_schedule(target_dir, tasks, agenda_data, depend_closures, cache):
         for input in task_data.inputs:
             if input.exists(): continue
             if str(input) in outputs: continue
-            _error('Skipping task \"%s\"' % task_data.description)
+            log.error('Skipping task \"%s\"' % task_data.description)
             logging.debug(
                 'Task input \"%s\" does not exist and will not '
                 'be generated during task graph evaluation.' % (
@@ -443,7 +429,7 @@ class OfflineEvaluator(Evaluator):
         depend_hash = _hash(self._depend_path)
         if self._depend_hash == depend_hash: return
         self._depend_hash = depend_hash
-        _info('%s was modified, rescheduling' % (
+        log.info('%s was modified, rescheduling' % (
             self._depend_path.relative_to(self._target_dir)
         ))
         self.pause()
@@ -470,12 +456,19 @@ class OfflineEvaluator(Evaluator):
         ))
 
     def start(self):
+        log.info('Beginning of evaluation in offline mode')
         self._watcher.start()
-        super().start()
+        try: super().start()
+        except Exception as e:
+            log.info('Failed evaluation in offline mode')
+            self._watcher.stop()
+            super().stop()
+            raise e
 
     def stop(self):
         self._watcher.stop()
         super().stop()
+        log.info('End of evaluation in offline mode')
 
 def offline(
     target_dir,
@@ -492,13 +485,12 @@ def offline(
 
     # Check agenda file path
     if not agenda_path.exists() and not agenda_path.is_file():
-        _critical('Agenda file not found: %s' % (
+        log.critical('Agenda file not found: %s' % (
             agenda_path.relative_to(target_dir)
         ))
         return False
 
     # Run offline evaluator
-    _info('Beginning of evaluation in offline mode')
     try:
         evaluator = OfflineEvaluator(
             target_dir,
@@ -509,18 +501,15 @@ def offline(
         )
         evaluator.start()
     except TaskError as error:
-        _critical('Task \"%s\" failed with message:\n%s' % (
+        log.critical('Task \"%s\" failed with message:\n%s' % (
             error.description, error.message
         ))
-        _info('Failed evaluation in offline mode')
         return False
     except RuntimeError as e:
-        _critical(str(e))
-        _info('Failed evaluation in offline mode')
+        log.critical(str(e))
         return False
 
     # Done
-    _info('End of evaluation in offline mode')
     return True
 
 ###############################################################################
@@ -562,7 +551,7 @@ class OnlineEvaluator(Evaluator):
         agenda_hash = _hash(self._agenda_path)
         if self._agenda_hash == agenda_hash: return
         self._agenda_hash = agenda_hash
-        _info('%s was modified, rescheduling' % (
+        log.info('%s was modified, rescheduling' % (
             self._agenda_path.relative_to(self._target_dir)
         ))
         self.pause()
@@ -573,7 +562,7 @@ class OnlineEvaluator(Evaluator):
         depend_hash = _hash(self._depend_path)
         if self._depend_hash == depend_hash: return
         self._depend_hash = depend_hash
-        _info('%s was modified, rescheduling' % (
+        log.info('%s was modified, rescheduling' % (
             self._depend_path.relative_to(self._target_dir)
         ))
         self.pause()
@@ -586,7 +575,7 @@ class OnlineEvaluator(Evaluator):
             source_hash = _hash(source_path)
             if self._source_hashes[_source_path] == source_hash: return
             self._source_hashes[_source_path] = source_hash
-        _info('%s was modified, rescheduling' % (
+        log.info('%s was modified, rescheduling' % (
             source_path.relative_to(self._target_dir)
         ))
         self.pause()
@@ -685,15 +674,17 @@ class OnlineEvaluator(Evaluator):
         ))
 
     def start(self):
+        log.info('Beginning of evaluation in online mode')
         self._watcher.start()
         super().start()
 
     def stop(self):
         self._watcher.stop()
         super().stop()
+        log.info('End of evaluation in online mode')
 
     def on_task_error(self, error):
-        _error('Task \"%s\" failed with message:\n%s' % (
+        log.info('Task \"%s\" failed with message:\n%s' % (
             error.description, error.message
         ))
 
@@ -712,24 +703,19 @@ def online(
 
     # Check agenda file path
     if not agenda_path.exists() and not agenda_path.is_file():
-        _critical('Agenda file not found: %s' % (
+        log.critical('Agenda file not found: %s' % (
             agenda_path.relative_to(target_dir)
         ))
         return False
 
-    # Run online evaluator
-    _info('Beginning of evaluation in online mode')
-    evaluator = OnlineEvaluator(
+    # Make online evaluator
+    return OnlineEvaluator(
         target_dir,
         agenda_path,
         depend_path,
         cache_path,
         worker_count
-    ).start()
-    _info('End of evaluation in online mode')
-
-    # Done
-    return True
+    )
 
 ###############################################################################
 # Clean mode
@@ -749,26 +735,26 @@ def clean(
     if not cache_path.exists(): return True
     cache = Cache(cache_path)
 
-    _info('Beginning of clean mode')
+    log.info('Beginning of clean mode')
 
     # Remove generated files
     for file_path in reversed(sorted(cache['files'])):
         if not os.path.exists(file_path): continue
-        _info('Removing %s' % Path(file_path).relative_to(target_dir))
+        log.info('Removing %s' % Path(file_path).relative_to(target_dir))
         os.remove(file_path)
 
     # Remove empty generated folders
     for dir_path in reversed(sorted(cache['folders'])):
         if not os.path.exists(dir_path): continue
         if not _empty_dir(dir_path): continue
-        _info('Removing %s' % Path(dir_path).relative_to(target_dir))
+        log.info('Removing %s' % Path(dir_path).relative_to(target_dir))
         os.rmdir(dir_path)
 
     # Remove cache
-    _info('Removing %s' % cache_path.relative_to(target_dir))
+    log.info('Removing %s' % cache_path.relative_to(target_dir))
     cache = None
     os.remove(cache_path)
 
     # Done
-    _info('End of clean mode')
+    log.info('End of clean mode')
     return True

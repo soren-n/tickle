@@ -3,7 +3,6 @@ from threading import Thread, Event
 from queue import Queue, Empty
 from time import sleep
 import logging
-import signal
 
 # Internal module dependencies
 from .util import SingleWriteMultipleReadLock
@@ -144,14 +143,6 @@ class Evaluator:
         if self._running:
             raise RuntimeError('Evaluator can not start if already running!')
         self._running = True
-
-        # Handle user terminate signal
-        def _terminate(*args):
-            logging.info('Ctrl-C registered; Evaluator terminating ...')
-            self.stop()
-
-        signal.signal(signal.SIGINT, _terminate)
-        signal.signal(signal.SIGTERM, _terminate)
 
         # Main loop
         for worker in self._workers: worker.start()
