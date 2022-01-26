@@ -6,6 +6,7 @@ import signal
 
 # Internal module dependencies
 from . import api
+from . import log
 
 ###############################################################################
 # Defaults
@@ -73,6 +74,8 @@ def main():
                 args.workers
             )
         if args.mode == 'online':
+
+            # Make evaluator
             evaluator = api.online(
                 cwd,
                 Path(cwd, args.agenda),
@@ -81,20 +84,18 @@ def main():
                 args.workers
             )
 
+            # Setup user termination
             def _terminate(*args):
-                logging.info('Ctrl-C registered; terminating ...')
+                log.info('Ctrl-C registered; terminating ...')
                 evaluator.stop()
 
             signal.signal(signal.SIGINT, _terminate)
             signal.signal(signal.SIGTERM, _terminate)
 
-            try: evaluator.start()
-            except Exception as e:
-                log.info('Failed evaluation in offline mode')
-                evaluator.stop()
-                log.critical(str(e))
-                return False
+            # Defer to evaluator
+            evaluator.start()
 
+            # Done
             return True
 
         if args.mode == 'clean':
