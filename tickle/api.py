@@ -5,7 +5,6 @@ from pathlib import Path
 from time import sleep
 import subprocess
 import hashlib
-import logging
 import os
 
 # Internal module dependencies
@@ -55,7 +54,7 @@ def _make_graph(cwd_path, agenda_data, cache):
         cache.flush()
 
     def _eval_cmd(task_name, task_data):
-        logging.debug('%s: %s' % (
+        log.debug('%s: %s' % (
             task_data.description,
             ' '.join(task_data.command)
         ))
@@ -320,7 +319,7 @@ def _make_schedule(target_dir, tasks, agenda_data, depend_closures, cache):
             if input.exists(): continue
             if str(input) in outputs: continue
             log.error('Skipping task \"%s\"' % task_data.description)
-            logging.debug(
+            log.debug(
                 'Task input \"%s\" does not exist and will not '
                 'be generated during task graph evaluation.' % (
                     input.relative_to(target_dir)

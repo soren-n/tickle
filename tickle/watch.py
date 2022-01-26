@@ -3,7 +3,9 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 from pathlib import Path
 from enum import Enum
-import logging
+
+# Internal module dependencies
+from . import log
 
 ###############################################################################
 # Enums
@@ -60,26 +62,26 @@ class FileWatcher(FileSystemEventHandler):
         src_path = Path(event.src_path)
         if src_path.is_dir(): return
         if src_path not in self._callbacks: return
-        logging.debug('FileWatcher.on_created(): %s' % src_path)
+        log.debug('FileWatcher.on_created(): %s' % src_path)
         self._callbacks[src_path](Event.Created)
 
     def on_modified(self, event):
         src_path = Path(event.src_path)
         if src_path.is_dir(): return
         if src_path not in self._callbacks: return
-        logging.debug('FileWatcher.on_modified(): %s' % src_path)
+        log.debug('FileWatcher.on_modified(): %s' % src_path)
         self._callbacks[src_path](Event.Modified)
 
     def on_moved(self, event):
         src_path = Path(event.src_path)
         if src_path.is_dir(): return
         if src_path not in self._callbacks: return
-        logging.debug('FileWatcher.on_moved(): %s' % src_path)
+        log.debug('FileWatcher.on_moved(): %s' % src_path)
         self._callbacks[src_path](Event.Moved)
 
     def on_deleted(self, event):
         src_path = Path(event.src_path)
         if src_path.is_dir(): return
         if src_path not in self._callbacks: return
-        logging.debug('FileWatcher.on_deleted(): %s' % src_path)
+        log.debug('FileWatcher.on_deleted(): %s' % src_path)
         self._callbacks[src_path](Event.Deleted)

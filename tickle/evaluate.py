@@ -2,10 +2,10 @@
 from threading import Thread, Event
 from queue import Queue, Empty
 from time import sleep
-import logging
 
 # Internal module dependencies
 from .util import SingleWriteMultipleReadLock
+from . import log
 
 ###############################################################################
 # Exceptions
@@ -139,7 +139,7 @@ class Evaluator:
         raise error
 
     def start(self):
-        logging.debug('Evaluator.start()')
+        log.debug('Evaluator.start()')
         if self._running:
             raise RuntimeError('Evaluator can not start if already running!')
         self._running = True
@@ -159,14 +159,14 @@ class Evaluator:
             for worker in self._workers: worker.join()
 
     def pause(self):
-        logging.debug('Evaluator.pause()')
+        log.debug('Evaluator.pause()')
         if self._paused:
             raise RuntimeError('Evaluator can not pause if already paused!')
         self._pause.acquire_read()
         self._paused = True
 
     def reprogram(self, program):
-        logging.debug('Evaluator.reprogram()')
+        log.debug('Evaluator.reprogram()')
         if self._running and not self._paused:
             raise RuntimeError('Evaluator must be paused prior to reprogramming!')
 
@@ -180,14 +180,14 @@ class Evaluator:
         self._program = program
 
     def resume(self):
-        logging.debug('Evaluator.resume()')
+        log.debug('Evaluator.resume()')
         if not self._paused:
             raise RuntimeError('Evaluator can not resume if not paused!')
         self._paused = False
         self._pause.release_read()
 
     def stop(self):
-        logging.debug('Evaluator.stop()')
+        log.debug('Evaluator.stop()')
         if not self._running:
             raise RuntimeError('Evaluator can not stop if already not running!')
         self._running = False
