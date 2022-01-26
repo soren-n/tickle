@@ -133,7 +133,8 @@ class Evaluator:
             error = self._exception.get(block = False)
             self._exception.task_done()
             self.on_task_error(error)
-        except Empty: return
+            return False
+        except Empty: return True
 
     def on_task_error(self, error):
         raise error
@@ -148,11 +149,14 @@ class Evaluator:
         for worker in self._workers: worker.start()
         try:
             while self._running:
+                if not self._check() and len(self._program) != 0:
+                    self.pause()
+                    self.deprogram()
+                    self.resume()
                 if len(self._program) == 0: sleep(1); continue
                 batch = self._program.pop(0)
                 for sequence in batch: self._queue.put(sequence)
                 self._queue.join()
-                self._check()
         finally:
             self._running = False
             for worker in self._workers: worker.stop()
@@ -176,8 +180,22 @@ class Evaluator:
             except Empty: break
             self._queue.task_done()
 
-        # Set the new program
+        # Set the new schedule
         self._program = program
+
+    def deprogram(self):
+        log.debug('Evaluator.deprogram()')
+        if self._running and not self._paused:
+            raise RuntimeError('Evaluator must be paused prior to deprogramming!')
+
+        # Clear existing program
+        while not self._queue.empty():
+            try: self._queue.get()
+            except Empty: break
+            self._queue.task_done()
+
+        # Clear schedule
+        self._program = list()
 
     def resume(self):
         log.debug('Evaluator.resume()')

@@ -461,7 +461,6 @@ class OfflineEvaluator(Evaluator):
         except Exception as e:
             log.info('Failed evaluation in offline mode')
             self._watcher.stop()
-            super().stop()
             raise e
 
     def stop(self):
