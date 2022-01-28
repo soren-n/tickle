@@ -42,7 +42,26 @@ CompiledAgenda = list[CompiledTask]
 # Functions
 ###############################################################################
 def load(agenda_path):
-    target_dir = agenda_path.parent
+    assert isinstance(agenda_path, Path)
+    with agenda_path.open('r') as agenda_file:
+        raw_data = yaml.safe_load(agenda_file)
+        return dataspec.decode(Agenda, raw_data)
+
+def store(agenda_path, agenda_data):
+    assert isinstance(agenda_data, Agenda)
+    with agenda_path.open('w+') as agenda_file:
+        raw_data = dataspec.encode(Agenda, agenda_data)
+        yaml.dump(
+            raw_data,
+            agenda_file,
+            width = 80,
+            indent = 2,
+            default_flow_style = False
+        )
+
+def compile(target_dir, agenda_data):
+    assert isinstance(target_dir, Path)
+    assert isinstance(agenda_data, Agenda)
 
     def _compile_proc(template):
         def _compile(template):
@@ -108,79 +127,61 @@ def load(agenda_path):
         }, sort_keys = True)
         return hashlib.md5(data.encode('utf-8')).hexdigest()
 
-    def _parse(agenda_data):
+    # Compile procs
+    procs = {
+        name : _compile_proc(proc)
+        for name, proc in agenda_data.procs.items()
+    }
 
-        # Compile procs
-        procs = {
-            name : _compile_proc(proc)
-            for name, proc in agenda_data.procs.items()
-        }
-
-        # Flow and stage to proc mapping
-        flow_proc_stage = dict()
-        for flow in agenda_data.flows:
-            if flow not in flow_proc_stage: flow_proc_stage[flow] = dict()
-            for index, stage in enumerate(agenda_data.flows[flow]):
-                for proc in stage:
-                    if proc not in procs:
-                        raise RuntimeError(
-                            'Undefined proc \"%s\" in stage %d of flow %s' % (
-                                proc, index + 1, flow
-                            )
+    # Flow and stage to proc mapping
+    flow_proc_stage = dict()
+    for flow in agenda_data.flows:
+        if flow not in flow_proc_stage: flow_proc_stage[flow] = dict()
+        for index, stage in enumerate(agenda_data.flows[flow]):
+            for proc in stage:
+                if proc not in procs:
+                    raise RuntimeError(
+                        'Undefined proc \"%s\" in stage %d of flow %s' % (
+                            proc, index + 1, flow
                         )
-                    if proc in flow_proc_stage[flow]:
-                        raise RuntimeError(
-                            'Proc \"%s\" reserved for stage %d of flow %s' % (
-                                proc, proc_stage[proc] + 1, flow
-                            )
+                    )
+                if proc in flow_proc_stage[flow]:
+                    raise RuntimeError(
+                        'Proc \"%s\" reserved for stage %d of flow %s' % (
+                            proc, proc_stage[proc] + 1, flow
                         )
-                    flow_proc_stage[flow][proc] = index
+                    )
+                flow_proc_stage[flow][proc] = index
 
-        # Parse tasks
-        agenda = list()
-        for task_data in agenda_data.tasks:
-            if task_data.proc not in procs:
-                raise RuntimeError('Undefined proc \"%s\" for task \"%s\"' % (
-                    task_data.proc, task_data.desc
-                ))
-            for flow in task_data.flows:
-                if flow not in flow_proc_stage:
-                    raise RuntimeError('Undefined flow \"%s\" for task \"\"' % (
-                        flow, task_data.desc
-                    ))
-            agenda.append(CompiledTask(
-                hash = _task_hash(task_data),
-                description = task_data.desc,
-                flows = {
-                    flow : flow_proc_stage[flow][task_data.proc]
-                    for flow in task_data.flows
-                },
-                command = procs[task_data.proc](**task_data.args),
-                inputs = {
-                    Path(target_dir, input)
-                    for input in set(task_data.inputs)
-                },
-                outputs = {
-                    Path(target_dir, output)
-                    for output in set(task_data.outputs)
-                }
+    # Parse tasks
+    agenda = list()
+    for task_data in agenda_data.tasks:
+        if task_data.proc not in procs:
+            raise RuntimeError('Undefined proc \"%s\" for task \"%s\"' % (
+                task_data.proc, task_data.desc
             ))
+        for flow in task_data.flows:
+            if flow not in flow_proc_stage:
+                raise RuntimeError('Undefined flow \"%s\" for task \"\"' % (
+                    flow, task_data.desc
+                ))
+        agenda.append(CompiledTask(
+            hash = _task_hash(task_data),
+            description = task_data.desc,
+            flows = {
+                flow : flow_proc_stage[flow][task_data.proc]
+                for flow in task_data.flows
+            },
+            command = procs[task_data.proc](**task_data.args),
+            inputs = {
+                Path(target_dir, input)
+                for input in set(task_data.inputs)
+            },
+            outputs = {
+                Path(target_dir, output)
+                for output in set(task_data.outputs)
+            }
+        ))
 
-        # Done
-        return agenda
-
-    with agenda_path.open('r') as agenda_file:
-        raw_data = yaml.safe_load(agenda_file)
-        return _parse(dataspec.decode(Agenda, raw_data))
-
-def store(agenda_path, agenda_data):
-    assert isinstance(agenda_data, Agenda)
-    with agenda_path.open('w+') as agenda_file:
-        raw_data = dataspec.encode(Agenda, agenda_data)
-        yaml.dump(
-            raw_data,
-            agenda_file,
-            width = 80,
-            indent = 2,
-            default_flow_style = False
-        )
+    # Done
+    return agenda

@@ -405,7 +405,10 @@ class OfflineEvaluator(Evaluator):
         self._watcher = FileWatcher()
 
         # Initial load of agenda
-        self._agenda_data = agenda.load(agenda_path)
+        self._agenda_data = agenda.compile(
+            agenda_path.parent,
+            agenda.load(agenda_path)
+        )
         self._tasks = _make_graph(
             self._target_dir,
             self._agenda_data,
@@ -617,7 +620,10 @@ class OnlineEvaluator(Evaluator):
             ]))
 
         # Load descriptions
-        self._agenda_data = agenda.load(self._agenda_path)
+        self._agenda_data = agenda.compile(
+            sekf._agenda_path.parent,
+            agenda.load(self._agenda_path)
+        )
         self._update_explicits(_agenda_explicits(self._agenda_data))
         self._depend_data = (
             depend.load(self._depend_path)
