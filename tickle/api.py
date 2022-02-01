@@ -621,7 +621,7 @@ class OnlineEvaluator(Evaluator):
 
         # Load descriptions
         self._agenda_data = agenda.compile(
-            sekf._agenda_path.parent,
+            self._agenda_path.parent,
             agenda.load(self._agenda_path)
         )
         self._update_explicits(_agenda_explicits(self._agenda_data))
