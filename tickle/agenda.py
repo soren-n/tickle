@@ -1,6 +1,6 @@
 # External module dependencies
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Any, ParamSpec, Callable, Tuple, List, Dict, Set
 from pathlib import Path
 import hashlib
 import json
@@ -16,38 +16,38 @@ from . import dataspec
 class Task:
     desc: str
     proc: str
-    flows: list[str]
-    args: dict[str, list[str]]
-    inputs: list[str]
-    outputs: list[str]
+    flows: List[str]
+    args: Dict[str, List[str]]
+    inputs: List[str]
+    outputs: List[str]
 
 @dataclass
 class Agenda:
-    procs: dict[str, list[str]] = field(default_factory = dict)
-    flows: dict[str, list[list[str]]] = field(default_factory = dict)
-    tasks: list[Task] = field(default_factory = list)
+    procs: Dict[str, List[str]] = field(default_factory = dict)
+    flows: Dict[str, List[List[str]]] = field(default_factory = dict)
+    tasks: List[Task] = field(default_factory = list)
 
 @dataclass
 class CompiledTask:
-    hash: int
+    hash: str
     description: str
-    flows: dict[str, int]
-    command: list[str]
-    inputs: set[Path]
-    outputs: set[Path]
+    flows: Dict[str, int]
+    command: List[str]
+    inputs: Set[Path]
+    outputs: Set[Path]
 
-CompiledAgenda = list[CompiledTask]
+CompiledAgenda = List[CompiledTask]
 
 ###############################################################################
 # Functions
 ###############################################################################
-def load(agenda_path):
+def load(agenda_path : Path) -> Agenda:
     assert isinstance(agenda_path, Path)
     with agenda_path.open('r') as agenda_file:
         raw_data = yaml.safe_load(agenda_file)
         return dataspec.decode(Agenda, raw_data)
 
-def store(agenda_path, agenda_data):
+def store(agenda_path : Path, agenda_data : Agenda):
     assert isinstance(agenda_data, Agenda)
     with agenda_path.open('w+') as agenda_file:
         raw_data = dataspec.encode(Agenda, agenda_data)
@@ -59,14 +59,12 @@ def store(agenda_path, agenda_data):
             default_flow_style = False
         )
 
-def compile(target_dir, agenda_data):
-    assert isinstance(target_dir, Path)
-    assert isinstance(agenda_data, Agenda)
-
-    def _compile_proc(template):
-        def _compile(template):
-            params = []
-            parts = []
+P = ParamSpec('P')
+def compile(target_dir : Path, agenda_data : Agenda) -> CompiledAgenda:
+    def _compile_proc(template : List[str]) -> Callable[P, List[str]]:
+        def _compile(template : List[str]) -> Tuple[List[str], str]:
+            params : List[str] = []
+            parts : List[str] = []
             for part in template:
                 if len(part) == 0: continue
                 if part.startswith('$'):
@@ -78,15 +76,15 @@ def compile(target_dir, agenda_data):
 
         params, command = _compile(template)
 
-        def _join(inputs):
-            def _wrap(input):
+        def _join(inputs : List[str]) -> str:
+            def _wrap(input : str) -> str:
                 if ' ' not in input: return input
                 return '\"%s\"' % input
 
             return ' '.join([ _wrap(input) for input in inputs ])
 
-        def _split(input):
-            result = []
+        def _split(input : str) -> List[str]:
+            result : List[str] = []
             subresult = ''
             worklist = input.split(' ')
             while len(worklist) != 0:
@@ -103,10 +101,10 @@ def compile(target_dir, agenda_data):
                 result.append(part)
             return result
 
-        def _apply(**args):
+        def _apply(**args : Any) -> List[str]:
             for param in params:
                 if param in args: continue
-                raise ArgumentError('Missing argument %s' % param)
+                raise TypeError('Missing required argument \"%s\"' % param)
             return list(filter(
                 lambda part: part != '',
                 _split(command % tuple(
@@ -117,7 +115,7 @@ def compile(target_dir, agenda_data):
 
         return _apply
 
-    def _task_hash(task_data):
+    def _task_hash(task_data : Task) -> str:
         data = json.dumps({
             'proc': task_data.proc,
             'args': task_data.args,
@@ -134,7 +132,7 @@ def compile(target_dir, agenda_data):
     }
 
     # Flow and stage to proc mapping
-    flow_proc_stage = dict()
+    flow_proc_stage : Dict[str, Dict[str, int]] = {}
     for flow in agenda_data.flows:
         if flow not in flow_proc_stage: flow_proc_stage[flow] = dict()
         for index, stage in enumerate(agenda_data.flows[flow]):
@@ -148,13 +146,13 @@ def compile(target_dir, agenda_data):
                 if proc in flow_proc_stage[flow]:
                     raise RuntimeError(
                         'Proc \"%s\" reserved for stage %d of flow %s' % (
-                            proc, proc_stage[proc] + 1, flow
+                            proc, flow_proc_stage[flow][proc] + 1, flow
                         )
                     )
                 flow_proc_stage[flow][proc] = index
 
     # Parse tasks
-    agenda = list()
+    agenda : CompiledAgenda = []
     for task_data in agenda_data.tasks:
         if task_data.proc not in procs:
             raise RuntimeError('Undefined proc \"%s\" for task \"%s\"' % (

@@ -1,4 +1,5 @@
 # External module dependencies
+from typing import Optional, Tuple, List, Dict, Set
 from multiprocessing import cpu_count
 from functools import partial
 from pathlib import Path
@@ -19,33 +20,37 @@ from . import log
 ###############################################################################
 # Defaults
 ###############################################################################
-def default_agenda_path(dir_path = Path('./')):
+def default_agenda_path(dir_path : Path = Path('./')) -> Path:
     return Path(dir_path, 'agenda.yaml')
 
-def default_depend_path(dir_path = Path('./')):
+def default_depend_path(dir_path : Path = Path('./')) -> Path:
     return Path(dir_path, 'depend.yaml')
 
-def default_cache_path(dir_path = Path('./')):
+def default_cache_path(dir_path : Path = Path('./')) -> Path:
     return Path(dir_path, 'tickle.cache')
 
-def default_worker_count():
+def default_worker_count() -> int:
     return cpu_count() - 1
 
 ###############################################################################
 # Task graph util
 ###############################################################################
-def _hash_wait(file_path):
+def _hash_wait(file_path : Path) -> str:
     while not file_path.exists(): sleep(1)
     with file_path.open('rb') as file:
         return hashlib.md5(file.read()).hexdigest()
 
-def _hash(file_path):
+def _hash(file_path : Path) -> Optional[str]:
     if not file_path.exists(): return
     with file_path.open('rb') as file:
         return hashlib.md5(file.read()).hexdigest()
 
-def _make_graph(cwd_path, agenda_data, cache):
-    def _make_dirs(dir_path):
+def _make_graph(
+    cwd_path : Path,
+    agenda_data : agenda.CompiledAgenda,
+    cache : Cache
+    ) -> List[Task]:
+    def _make_dirs(dir_path : Path):
         for parent_path in reversed(dir_path.parents):
             try:
                 os.mkdir(parent_path)
@@ -53,7 +58,7 @@ def _make_graph(cwd_path, agenda_data, cache):
             except: continue
         cache.flush()
 
-    def _eval_cmd(task_name, task_data):
+    def _eval_cmd(task_name : str, task_data : agenda.CompiledTask):
         log.debug('%s: %s' % (
             task_data.description,
             ' '.join(task_data.command)
@@ -65,7 +70,7 @@ def _make_graph(cwd_path, agenda_data, cache):
             _make_dirs(output_path)
 
         # Track generated files
-        cache['files'] = set.union(cache['files'], {
+        cache['files'] = Set[Path].union(cache['files'], {
             str(output) for output in task_data.outputs
         })
 
@@ -92,11 +97,14 @@ def _make_graph(cwd_path, agenda_data, cache):
         return result.stdout
 
     # Create tasks
-    tasks = list()
-    output_map = dict()
+    tasks : List[Task] = list()
+    output_map : Dict[str, Tuple[agenda.CompiledTask, Task]] = dict()
     for index, task_data in enumerate(agenda_data):
         task_name = 'task%d' % index
-        task = Task(task_data.flows, partial(_eval_cmd, task_name, task_data))
+        task = Task(
+            task_data.flows,
+            partial(_eval_cmd, task_name, task_data)
+        )
         tasks.append(task)
         for file_path in task_data.outputs:
             output = str(file_path)
@@ -121,14 +129,17 @@ def _make_graph(cwd_path, agenda_data, cache):
     return tasks
 
 def _update_depend(
-    agenda_data,
-    depend_data,
-    watcher,
-    cache
-    ):
+    agenda_data : agenda.CompiledAgenda,
+    depend_data : depend.CompiledDepend,
+    watcher : FileWatcher,
+    cache : Cache
+    ) -> Tuple[Set[str], Dict[str, Set[str]]]:
 
-    def _outputs(agenda_data, depend_data):
-        return set.union(*[
+    def _outputs(
+        agenda_data : agenda.CompiledAgenda,
+        depend_data : depend.CompiledDepend
+        ) -> Set[str]:
+        return Set[str].union(*[
             { str(output) for output in task_data.outputs }
             for task_data in agenda_data
         ]).union({
@@ -136,17 +147,22 @@ def _update_depend(
             for src_path in depend_data.keys()
         })
 
-    def _explicits(agenda_data):
-        return set.union(*[
-            set.union(
+    def _explicits(
+        agenda_data : agenda.CompiledAgenda
+        ) -> Set[str]:
+        return Set[str].union(*[
+            Set[str].union(
                 { str(input) for input in task_data.inputs },
                 { str(input) for input in task_data.outputs }
             )
             for task_data in agenda_data
         ])
 
-    def _join_graphs(agenda_data, depend_data):
-        result = dict()
+    def _join_graphs(
+        agenda_data : agenda.CompiledAgenda,
+        depend_data : depend.CompiledDepend
+        ) -> Dict[str, Set[str]]:
+        result : Dict[str, Set[str]] = dict()
         for task_data in agenda_data:
             dsts = { str(file_path) for file_path in task_data.inputs }
             for src in task_data.outputs:
@@ -158,8 +174,15 @@ def _update_depend(
             result[src] = result[src].union(dsts)
         return result
 
-    def _has_cycle(worklist, graph):
-        def _visit(node, path, visited):
+    def _has_cycle(
+        worklist : List[str],
+        graph : Dict[str, Set[str]]
+        ) -> bool:
+        def _visit(
+            node : str,
+            path : List[str],
+            visited : Set[str]
+            ) -> bool:
             if node in visited: return False
             if node in path: return True
             _path = path.copy()
@@ -171,14 +194,17 @@ def _update_depend(
                 if _visit(dep, _path, _visited): return True
             return False
 
-        visited = set()
+        visited : Set[str] = set()
         for node in worklist:
             if _visit(node, [], visited): return True
             visited.add(node)
         return False
 
-    def _reachable(worklist, deps):
-        result = list()
+    def _reachable(
+        worklist : List[str],
+        deps : Dict[str, Set[str]]
+        ) -> List[str]:
+        result : List[str] = list()
         while len(worklist) != 0:
             node = worklist.pop(0)
             if node in result: continue
@@ -187,15 +213,21 @@ def _update_depend(
             worklist += deps[node]
         return result
 
-    def _leafs(nodes, graph):
-        def _is_leaf(node):
+    def _leafs(
+        nodes : List[str],
+        graph : Dict[str, Set[str]]
+        ) -> List[str]:
+        def _is_leaf(node : str):
             if node not in graph: return True
             if len(graph[node]) == 0: return True
             return False
         return list(filter(_is_leaf, nodes))
 
-    def _inverse_graph_alive(alive, graph):
-        result = dict()
+    def _inverse_graph_alive(
+        alive : List[str],
+        graph : Dict[str, Set[str]]
+        ) -> Dict[str, Set[str]]:
+        result : Dict[str, Set[str]] = dict()
         for src, dsts in graph.items():
             if src not in alive: continue
             for dst in dsts:
@@ -204,26 +236,30 @@ def _update_depend(
                 result[dst].add(src)
         return result
 
-    def _topological_order(worklist, deps, refs):
-        result = list()
+    def _topological_order(
+        worklist : List[str],
+        deps : Dict[str, Set[str]],
+        refs : Dict[str, Set[str]]
+        ) -> List[str]:
+        result : List[str] = list()
         while len(worklist) != 0:
             node = worklist.pop(0)
             if node in result: continue
-            node_deps = deps[node] if node in deps else set()
+            node_deps : Set[str] = deps[node] if node in deps else set()
             if len(node_deps.difference(set(result))) != 0: continue
             result.append(node)
             worklist += refs[node] if node in refs else set()
         return result
 
     # Find agenda sources and check for cycles against depend
-    nodes = list(_outputs(agenda_data, depend_data))
-    deps = _join_graphs(agenda_data, depend_data)
+    nodes : List[str] = list(_outputs(agenda_data, depend_data))
+    deps : Dict[str, Set[str]] = _join_graphs(agenda_data, depend_data)
     if _has_cycle(nodes[:], deps):
         raise RuntimeError('Cycle found in depend!')
 
     # Find dependency closures
-    depend_closures = dict()
-    alive = _reachable(nodes[:], deps)
+    depend_closures : Dict[str, Set[str]] = dict()
+    alive : List[str] = _reachable(nodes[:], deps)
     ordered_depends = _topological_order(
         _leafs(alive, deps), deps,
         _inverse_graph_alive(alive, deps)
@@ -233,7 +269,7 @@ def _update_depend(
             depend_closures[src_file] = set()
             continue
         src_deps = deps[src_file]
-        depend_closures[src_file] = set.union(src_deps, *[
+        depend_closures[src_file] = Set[str].union(src_deps, *[
             depend_closures[dst_file] for dst_file in src_deps
         ])
 
@@ -241,34 +277,54 @@ def _update_depend(
     implicits = set(alive).difference(_explicits(agenda_data))
     return implicits, depend_closures
 
-def _make_schedule(target_dir, tasks, agenda_data, depend_closures, cache):
-    def _task_index_graph(nodes, node_count):
-        result = dict()
+def _make_schedule(
+    target_dir : Path,
+    tasks : List[Task],
+    agenda_data : agenda.CompiledAgenda,
+    depend_closures : Dict[str, Set[str]],
+    cache : Cache
+    ):
+    def _task_index_graph(
+        nodes : List[Task],
+        node_count : int
+        ) -> Dict[int, Set[int]]:
+        result : Dict[int, Set[int]] = dict()
         for index, node in enumerate(nodes):
             if index >= node_count: break
             result[index] = set()
-            for dep in graph.deps(node):
+            for dep in node.get_deps():
                 dep_index = nodes.index(dep)
                 if dep_index >= node_count: continue
                 result[index].add(dep_index)
         return result
 
-    def _index_graph_inverse(graph, node_count):
-        result = { dep : set() for dep in range(node_count) }
+    def _index_graph_inverse(
+        graph : Dict[int, Set[int]],
+        node_count : int
+        ) -> Dict[int, Set[int]]:
+        result : Dict[int, Set[int]] = {
+            dep : set() for dep in range(node_count)
+        }
         for node, deps in graph.items():
             for dep in deps:
                 result[dep].add(node)
         return result
 
-    def _index_graph_leafs(deps):
-        result = list()
+    def _index_graph_leafs(
+        deps : Dict[int, Set[int]]
+        ) -> List[int]:
+        result : List[int] = list()
         for node, _deps in deps.items():
             if len(_deps) != 0: continue
             result.append(node)
         return result
 
-    def _topological_order(worklist, deps, refs):
-        result = list()
+    def _topological_order(
+        worklist : List[int],
+        deps : Dict[int, Set[int]],
+        refs : Dict[int, Set[int]]
+        ) -> List[int]:
+        result : List[int] = list()
         while len(worklist) != 0:
             node = worklist.pop(0)
             result_set = set(result)
@@ -292,7 +348,7 @@ def _make_schedule(target_dir, tasks, agenda_data, depend_closures, cache):
         cache['hashes'][task_name] = {}
 
     # Task recovery
-    hashes = dict()
+    hashes : Dict[str, Dict[str, str]] = dict()
     recover = cache['recover']
     cache['recover'] = dict()
     for index, task in enumerate(agenda_data):
@@ -306,7 +362,7 @@ def _make_schedule(target_dir, tasks, agenda_data, depend_closures, cache):
     cache['hashes'] = hashes
 
     # Disable impossible tasks
-    outputs = set()
+    outputs : Set[str] = set()
     task_count = len(agenda_data)
     deps = _task_index_graph(tasks, task_count)
     refs = _index_graph_inverse(deps, task_count)
@@ -329,7 +385,7 @@ def _make_schedule(target_dir, tasks, agenda_data, depend_closures, cache):
             break
 
         # Task is possible collect ouputs
-        outputs = set.union(outputs, {
+        outputs = Set[str].union(outputs, {
             str(output) for output in task_data.outputs
         })
 
@@ -342,7 +398,7 @@ def _make_schedule(target_dir, tasks, agenda_data, depend_closures, cache):
 
         # Check for depend closure change
         inputs = { str(input) for input in task_data.inputs }
-        curr_closure = set.union(inputs, *[
+        curr_closure = Set[str].union(inputs, *[
             depend_closures[input] for input in inputs
         ])
         prev_closure = { input for input in prev_hashes.keys() }
@@ -390,11 +446,11 @@ def _make_schedule(target_dir, tasks, agenda_data, depend_closures, cache):
 ###############################################################################
 class OfflineEvaluator(Evaluator):
     def __init__(self,
-        target_dir,
-        agenda_path,
-        depend_path,
-        cache_path,
-        worker_count
+        target_dir : Path,
+        agenda_path : Path,
+        depend_path : Path,
+        cache_path : Path,
+        worker_count : int
         ):
         super().__init__(worker_count)
         self._target_dir = target_dir
@@ -427,7 +483,7 @@ class OfflineEvaluator(Evaluator):
         # Online reload of depend
         self._watcher.subscribe(depend_path, self._event_depend)
 
-    def _event_depend(self, event):
+    def _event_depend(self, event : Event):
         depend_hash = _hash(self._depend_path)
         if self._depend_hash == depend_hash: return
         self._depend_hash = depend_hash
@@ -440,7 +496,10 @@ class OfflineEvaluator(Evaluator):
 
     def _update_depend(self):
         depend_data = (
-            depend.load(self._depend_path)
+            depend.compile(
+                self._depend_path,
+                depend.load(self._depend_path)
+            )
             if self._depend_path.exists() else {}
         )
         _, closures = _update_depend(
@@ -472,11 +531,11 @@ class OfflineEvaluator(Evaluator):
         log.info('End of evaluation in offline mode')
 
 def offline(
-    target_dir,
-    agenda_path,
-    depend_path,
-    cache_path,
-    worker_count = default_worker_count()
+    target_dir : Path,
+    agenda_path : Path,
+    depend_path : Path,
+    cache_path : Path,
+    worker_count : int = default_worker_count()
     ):
 
     assert target_dir.is_absolute()
@@ -518,11 +577,11 @@ def offline(
 ###############################################################################
 class OnlineEvaluator(Evaluator):
     def __init__(self,
-        target_dir,
-        agenda_path,
-        depend_path,
-        cache_path,
-        worker_count
+        target_dir : Path,
+        agenda_path : Path,
+        depend_path : Path,
+        cache_path : Path,
+        worker_count : int
         ):
         super().__init__(worker_count)
         self._target_dir = target_dir
@@ -534,19 +593,19 @@ class OnlineEvaluator(Evaluator):
         self._watcher = FileWatcher()
 
         # Initial load of agenda and depend
-        self._explicits = set()
-        self._implicits = set()
-        self._closures = dict()
-        self._agenda_hash = _hash(agenda_path)
-        self._depend_hash = _hash(depend_path)
-        self._source_hashes = dict()
+        self._explicits : Set[str] = set()
+        self._implicits : Set[str] = set()
+        self._closures : Dict[str, Set[str]] = dict()
+        self._agenda_hash : Optional[str] = _hash(agenda_path)
+        self._depend_hash : Optional[str] = _hash(depend_path)
+        self._source_hashes : Dict[str, Optional[str]] = dict()
         self._update_agenda()
 
         # Setup file watching
         self._watcher.subscribe(agenda_path, self._event_agenda)
         self._watcher.subscribe(depend_path, self._event_depend)
 
-    def _event_agenda(self, event):
+    def _event_agenda(self, event : Event):
         if event != Event.Modified:
             raise RuntimeError('Unexpected file event %s' % event)
         agenda_hash = _hash(self._agenda_path)
@@ -559,7 +618,7 @@ class OnlineEvaluator(Evaluator):
         self._update_agenda()
         self.resume()
 
-    def _event_depend(self, event):
+    def _event_depend(self, event : Event):
         depend_hash = _hash(self._depend_path)
         if self._depend_hash == depend_hash: return
         self._depend_hash = depend_hash
@@ -570,7 +629,10 @@ class OnlineEvaluator(Evaluator):
         self._update_depend()
         self.resume()
 
-    def _event_source(self, source_path, event):
+    def _event_source(self,
+        source_path : Path,
+        event : Event
+        ):
         _source_path = str(source_path)
         if _source_path in self._source_hashes:
             source_hash = _hash(source_path)
@@ -583,7 +645,7 @@ class OnlineEvaluator(Evaluator):
         self._update_source()
         self.resume()
 
-    def _update_explicits(self, explicits):
+    def _update_explicits(self, explicits : Set[str]):
         for file_path in self._explicits.difference(explicits):
             _file_path = Path(self._target_dir, file_path)
             self._watcher.unsubscribe(_file_path)
@@ -596,7 +658,7 @@ class OnlineEvaluator(Evaluator):
             self._source_hashes[file_path] = _hash(_file_path)
         self._explicits = explicits
 
-    def _update_implicits(self, implicits):
+    def _update_implicits(self, implicits : Set[str]):
         for file_path in self._implicits.difference(implicits):
             _file_path = Path(self._target_dir, file_path)
             self._watcher.unsubscribe(_file_path)
@@ -610,11 +672,13 @@ class OnlineEvaluator(Evaluator):
         self._implicits = implicits
 
     def _update_agenda(self):
-        def _agenda_explicits(agenda_data):
-            return set.union(*[
+        def _agenda_explicits(
+            agenda_data : agenda.CompiledAgenda
+            ) -> Set[str]:
+            return Set[str].union(*[
                 { str(input) for input in task_data.inputs }
                 for task_data in agenda_data
-            ]).difference(set.union(*[
+            ]).difference(Set[str].union(*[
                 { str(output) for output in task_data.outputs }
                 for task_data in agenda_data
             ]))
@@ -626,7 +690,10 @@ class OnlineEvaluator(Evaluator):
         )
         self._update_explicits(_agenda_explicits(self._agenda_data))
         self._depend_data = (
-            depend.load(self._depend_path)
+            depend.compile(
+                self._depend_path,
+                depend.load(self._depend_path)
+            )
             if self._depend_path.exists() else {}
         )
 
@@ -652,7 +719,10 @@ class OnlineEvaluator(Evaluator):
         ))
 
     def _update_depend(self):
-        self._depend_data = depend.load(self._depend_path)
+        self._depend_data = depend.compile(
+            self._depend_path,
+            depend.load(self._depend_path)
+        )
         implicits, self._closures = _update_depend(
             self._agenda_data,
             self._depend_data,
@@ -687,18 +757,18 @@ class OnlineEvaluator(Evaluator):
         super().stop()
         log.info('End of evaluation in online mode')
 
-    def on_task_error(self, error):
+    def on_task_error(self, error : TaskError):
         log.info('Task \"%s\" failed with message:\n%s' % (
             error.description, error.message
         ))
 
 def online(
-    target_dir,
-    agenda_path,
-    depend_path,
-    cache_path,
-    worker_count = default_worker_count()
-    ):
+    target_dir : Path,
+    agenda_path : Path,
+    depend_path : Path,
+    cache_path : Path,
+    worker_count : int = default_worker_count()
+    ) -> Optional[OnlineEvaluator]:
 
     assert target_dir.is_absolute()
     assert agenda_path.is_relative_to(target_dir)
@@ -710,7 +780,7 @@ def online(
         log.critical('Agenda file not found: %s' % (
             agenda_path.relative_to(target_dir)
         ))
-        return False
+        return
 
     # Make online evaluator
     return OnlineEvaluator(
@@ -725,14 +795,14 @@ def online(
 # Clean mode
 ###############################################################################
 def clean(
-    target_dir,
-    cache_path
-    ):
+    target_dir : Path,
+    cache_path : Path
+    ) -> bool:
 
     assert target_dir.is_absolute()
     assert cache_path.is_relative_to(target_dir)
 
-    def _empty_dir(dir_path):
+    def _empty_dir(dir_path : Path) -> bool:
         return len(os.listdir(dir_path)) == 0
 
     # Load cache

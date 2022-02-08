@@ -1,42 +1,47 @@
+# External module dependencies
+from typing import Tuple, List, Dict, Set
+
+# Internal module dependencies
+from .evaluate import Task, Program, Batch
+
 ###############################################################################
 # Functions
 ###############################################################################
-def deps(task): return task._deps
-def refs(task): return task._refs
-
-def has_cycle(worklist):
-    def _visit(task, path, visited):
+def has_cycle(worklist : List[Task]):
+    def _visit(task : Task, path : List[Task], visited : Set[Task]) -> bool:
         if task in visited: return False
         if task in path: return True
         _path = path.copy()
         _path.append(task)
         _visited = visited.copy()
         _visited.add(task)
-        for dep in deps(task):
+        for dep in task.get_deps():
             if _visit(dep, _path, _visited): return True
         return False
 
-    visited = set()
+    visited : Set[Task] = set()
     for task in worklist:
         if _visit(task, list(), visited): return True
         visited.add(task)
     return False
 
-def get_leafs(graph):
-    return list(filter(lambda node: len(deps(node)) == 0, graph))
+Graph = List[Task]
 
-def get_roots(graph):
-    return list(filter(lambda node: len(refs(node)) == 0, graph))
+def get_leafs(graph : Graph):
+    return list(filter(lambda node: len(node.get_deps()) == 0, graph))
 
-def propagate(graph):
-    def __topological_order(worklist):
-        result = list()
+def get_roots(graph : Graph):
+    return list(filter(lambda node: len(node.get_refs()) == 0, graph))
+
+def propagate(graph : Graph):
+    def __topological_order(worklist : List[Task]):
+        result : List[Task] = list()
         while len(worklist) != 0:
             node = worklist.pop(0)
             result_set = set(result)
             if node in result_set: continue
-            if len(deps(node).difference(result_set)) != 0: continue
-            worklist += refs(node).difference(result_set)
+            if len(node.get_deps().difference(result_set)) != 0: continue
+            worklist += node.get_refs().difference(result_set)
             result.append(node)
         return result
 
@@ -47,44 +52,47 @@ def propagate(graph):
 
     # Propagate invalidity
     for dst in __topological_order(worklist):
-        for src in deps(dst):
+        for src in dst.get_deps():
             if not src.get_valid(): dst.set_valid(False)
             if not src.get_active(): dst.set_active(False)
 
-def compile(graph):
+def compile(graph : Graph) -> Program:
 
     # Find tasks that needs to be performed
-    def _reachable_alive(worklist):
-        result = list()
+    def _reachable_alive(worklist : List[Task]) -> Set[Task]:
+        result : Set[Task] = set()
         while len(worklist) != 0:
             task = worklist.pop(0)
             if task in result: continue
             if task.get_valid(): continue
             if not task.get_active(): continue
-            result.append(task)
-            worklist += deps(task)
-        return list(reversed(result))
+            result.add(task)
+            worklist += task.get_deps()
+        return result
 
     # Find initial tasks
-    def _find_leafs(worklist, alive):
-        result = list()
-        visited = set()
+    def _find_leafs(worklist : List[Task], alive : Set[Task]) -> List[Task]:
+        result : List[Task] = list()
+        visited : Set[Task] = set()
         while len(worklist) != 0:
             task = worklist.pop(0)
             if task in visited: continue
             if task not in alive: continue
             visited.add(task)
-            alive_deps = deps(task).intersection(alive)
+            alive_deps = task.get_deps().intersection(alive)
             if len(alive_deps) == 0: result.append(task)
             else: worklist += alive_deps
         return result
 
     # Join sequential tasks
-    def _join_tasks(worklist, alive):
-        def _should_join(task, alive_deps):
+    def _join_tasks(
+        worklist : List[Task],
+        alive : Set[Task]
+        ) -> Tuple[List[List[Task]], Dict[Task, int]]:
+        def _should_join(task : Task, alive_deps : List[Task]) -> bool:
             if len(alive_deps) != 1: return False
             dep = alive_deps[0]
-            if len(refs(dep).intersection(alive)) != 1: return False
+            if len(dep.get_refs().intersection(alive)) != 1: return False
             dep_flows = dep.get_flows()
             for flow, stage in task.get_flows().items():
                 if flow not in dep_flows: continue
@@ -92,15 +100,15 @@ def compile(graph):
                 return False
             return True
 
-        result = list()
-        seqs = dict()
-        visited = set()
+        result : List[List[Task]] = list()
+        seqs : Dict[Task, int] = dict()
+        visited : Set[Task] = set()
         while len(worklist) != 0:
             task = worklist.pop(0)
             if task in visited: continue
             visited.add(task)
-            worklist += refs(task).intersection(alive)
-            alive_deps = list(deps(task).intersection(alive))
+            worklist += task.get_refs().intersection(alive)
+            alive_deps = list(task.get_deps().intersection(alive))
             if _should_join(task, alive_deps):
                 index = seqs[alive_deps[0]]
                 result[index].append(task)
@@ -112,28 +120,34 @@ def compile(graph):
         return result, seqs
 
     # Sort task seqs in topological order
-    def _parallel_ordering(seqs, seq_map):
-        def _stage_batches(leafs, alive):
-            def _seq_refs(seq, alive):
+    def _parallel_ordering(
+        seqs : List[List[Task]],
+        seq_map : Dict[Task, int]
+        ) -> Program:
+        def _stage_batches(
+            leafs : List[Task],
+            alive : Set[Task]
+            ) -> List[List[Batch]]:
+            def _seq_refs(seq : int, alive : Set[Task]) -> Set[int]:
                 last = seqs[seq][-1]
-                alive_refs = refs(last).intersection(alive)
+                alive_refs = last.get_refs().intersection(alive)
                 return set( seq_map[ref] for ref in alive_refs )
 
-            def _seq_deps(seq, alive):
+            def _seq_deps(seq : int, alive : Set[Task]) -> Set[int]:
                 first = seqs[seq][0]
-                alive_deps = deps(first).intersection(alive)
+                alive_deps = first.get_deps().intersection(alive)
                 return set( seq_map[dep] for dep in alive_deps )
 
-            def _add_work(worklist, work):
+            def _add_work(worklist : List[int], work : Set[int]):
                 if len(work) == 0: return
                 for item in work:
                     if item in worklist: continue
                     worklist.append(item)
 
-            result = dict()
-            batches = dict()
-            visited = set()
-            worklist = list()
+            result : Dict[int, Set[int]] = dict()
+            batches : Dict[int, int] = dict()
+            visited : Set[int] = set()
+            worklist : List[int] = list()
             _add_work(worklist, set( seq_map[leaf] for leaf in leafs ))
             while len(worklist) != 0:
                 seq = worklist.pop(0)
@@ -151,36 +165,50 @@ def compile(graph):
                 for batch in range(len(result))
             ]
 
-        def _uid_deps(seq, uid_by_seq, alive):
+        def _uid_deps(
+            seq : List[Task],
+            uid_by_seq : Dict[int, int],
+            alive : Set[Task]
+            ) -> Set[int]:
             return {
                 uid_by_seq[id(seqs[seq_map[node]])]
-                for node in deps(seq[0]).intersection(alive)
+                for node in seq[0].get_deps().intersection(alive)
             }
 
-        def _uid_refs(seq, uid_by_seq, alive):
+        def _uid_refs(
+            seq : List[Task],
+            uid_by_seq : Dict[int, int],
+            alive : Set[Task]
+            ) -> Set[int]:
             return {
                 uid_by_seq[id(seqs[seq_map[node]])]
-                for node in refs(seq[-1]).intersection(alive)
+                for node in seq[-1].get_refs().intersection(alive)
             }
 
-        def _combine_batches(batches_by_flow):
-            def _leafs(graph):
-                result = list()
+        def _combine_batches(
+            batches_by_flow : Dict[str, List[List[Batch]]]
+            ) -> List[List[List[Task]]]:
+            def _leafs(graph : Dict[int, Set[int]]) -> List[int]:
+                result : List[int] = list()
                 for src, dsts in graph.items():
                     if len(dsts) != 0: continue
                     result.append(src)
                 return result
 
-            def _add_work(worklist, work):
+            def _add_work(worklist : List[int], work : Set[int]):
                 if len(work) == 0: return
                 for item in work:
                     if item in worklist: continue
                     worklist.append(item)
 
-            def _batches(worklist, deps, refs):
-                result = dict()
-                batches = dict()
-                visited = set()
+            def _batches(
+                worklist : List[int],
+                deps : Dict[int, Set[int]],
+                refs : Dict[int, Set[int]]
+                ) -> List[Set[int]]:
+                result : Dict[int, Set[int]] = dict()
+                batches : Dict[int, int] = dict()
+                visited : Set[int] = set()
                 while len(worklist) != 0:
                     node = worklist.pop(0)
                     if node in visited: continue
@@ -195,9 +223,11 @@ def compile(graph):
                 return [ result[batch] for batch in range(len(result)) ]
 
             # Assign each seq an id
-            uid_by_seq = { id(seq) : uid for uid, seq in enumerate(seqs) }
-            graph_deps = dict()
-            graph_refs = dict()
+            uid_by_seq : Dict[int, int] = {
+                id(seq) : uid for uid, seq in enumerate(seqs)
+            }
+            graph_deps : Dict[int, Set[int]] = dict()
+            graph_refs : Dict[int, Set[int]] = dict()
             alive = set(seq_map.keys())
             for uid, seq in enumerate(seqs):
                 graph_deps[uid] = _uid_deps(seq, uid_by_seq, alive)
@@ -226,19 +256,19 @@ def compile(graph):
             ]
 
         # Sort by flow
-        seqs_by_flow = dict()
+        seqs_by_flow : Dict[str, List[List[Task]]] = dict()
         for seq in seqs:
             for flow in seq[0].get_flows().keys():
                 if flow not in seqs_by_flow: seqs_by_flow[flow] = list()
                 seqs_by_flow[flow].append(seq)
 
         # Find batches for each flow separately
-        batches_by_flow = dict()
+        batches_by_flow : Dict[str, List[List[Batch]]] = dict()
         for flow in seqs_by_flow.keys():
 
             # Sort by stage
-            alive_by_stage = dict()
-            seq_by_stage = dict()
+            alive_by_stage : Dict[int, Set[Task]] = dict()
+            seq_by_stage : Dict[int, List[List[Task]]] = dict()
             for seq in seqs_by_flow[flow]:
                 stage = seq[0].get_flows()[flow]
                 if stage not in alive_by_stage:
@@ -248,7 +278,7 @@ def compile(graph):
                 seq_by_stage[stage].append(seq)
 
             # Roots of each stage
-            leafs_by_stage = dict()
+            leafs_by_stage : Dict[int, List[Task]] = dict()
             for stage in alive_by_stage.keys():
                 stage_seq = seq_by_stage[stage]
                 stage_alive = alive_by_stage[stage]
@@ -256,7 +286,7 @@ def compile(graph):
                 leafs_by_stage[stage] = _find_leafs(worklist, stage_alive)
 
             # Find batches of each stage
-            batches = list()
+            batches : List[List[Batch]] = list()
             for stage in sorted(list(alive_by_stage.keys())):
                 stage_leafs = leafs_by_stage[stage]
                 stage_alive = alive_by_stage[stage]

@@ -1,117 +1,159 @@
 # External module dependencies
 from dataclasses import is_dataclass
+from typing import cast, get_args, Any, Union, List, Dict
 from inspect import signature
-import types
+
+###############################################################################
+# Type
+###############################################################################
+DataspecValue = Union[
+    int, float, str,
+    'Dataspec'
+]
+Dataspec = Union[
+    List['DataspecValue'],
+    Dict[str, 'DataspecValue']
+]
 
 ###############################################################################
 # Functions
 ###############################################################################
-def decode(T, value):
-    def _simple(T, value):
-        S = type(value)
-        if T == S: return value
-        raise TypeError('Expected a type of %s but got %s for value \"%s\"' % (
-            T.__name__, S.__name__, str(value)
-        ))
+def decode(T : type, value : Any) -> Any:
+    def _value(T : type, value : Any) -> Any:
+        if T in [str, int, float]: return _simple(T, value)
+        return _document(T, value)
 
-    def _list(T, value):
-        if not isinstance(value, list):
-            raise TypeError('Expected a type of list[T] but got %s for value \"%s\"' % (
-                type(value).__name__, str(value)
-            ))
-        args = T.__args__
-        if len(args) != 1:
-            raise TypeError('Expected list type to have exactly one parameter')
-        return [ decode(args[0], item) for item in value ]
+    def _composite(T : type, value : Any) -> Any:
+        if '__origin__' in T.__dict__:
+            if T.__dict__['__origin__'] == list: return _list(T, value)
+            if T.__dict__['__origin__'] == dict: return _dict(T, value)
+        raise TypeError('Unsupported dataspec type %s' % T.__name__)
 
-    def _dict(T, value):
+    def _document(T : type, value : Any) -> Any:
+        if not is_dataclass(T): return _composite(T, value)
         if not isinstance(value, dict):
-            raise TypeError('Expected a type of dict[str, T] but got %s for value \"%s\"' % (
+            raise TypeError(
+                'Expected a type of dict but got %s for value \"%s\"' % (
                 type(value).__name__, str(value)
             ))
-        args = T.__args__
+        result = {}
+        for l, t in signature(T).parameters.items():
+            if l not in value:
+                raise TypeError('Expected dict to define field %s' % l)
+            result[l] = _value(t.annotation, value[l])
+        return T(**result)
+
+    def _simple(T : type, value : Any) -> Any:
+            S = type(value)
+            if T == S: return value
+            raise TypeError(
+                'Expected a type of %s but got %s for value \"%s\"' % (
+                T.__name__, S.__name__, str(value)
+            ))
+
+    def _list(T : type, value : Any) -> List[Any]:
+        if not isinstance(value, list):
+            raise TypeError(
+                'Expected a type of List[T] but got %s for value \"%s\"' % (
+                type(value).__name__, str(value)
+            ))
+        value = cast(List[Any], value)
+        args = get_args(T)
+        if len(args) != 1:
+            raise TypeError(
+                'Expected list type to have exactly one parameter'
+            )
+        return [ _value(args[0], item) for item in value ]
+
+    def _dict(T : type, value : Any) -> Dict[Any, Any]:
+        if not isinstance(value, dict):
+            raise TypeError(
+                'Expected a type of dict but got %s' % (
+                type(value).__name__
+            ))
+        value = cast(Dict[Any, Any], value)
+        args = get_args(T)
         if len(args) != 2:
-            raise TypeError('Expected dict type to have exactly two parameters')
+            raise TypeError(
+                'Expected dict type to have exactly two parameters'
+            )
         if args[0] != str:
-            raise TypeError('Expected key type to be str but got %s' % (
+            raise TypeError(
+                'Expected key type to be str but got %s' % (
                 args[0].__name__
             ))
         for key in value.keys():
             if isinstance(key, str): continue
-            raise TypeError('Expected key %s to be of type %s but got %s' % (
+            raise TypeError(
+                'Expected key %s to be of type %s but got %s' % (
                 key, str.__name__, type(key).__name__
             ))
-        return { k: decode(args[1], v) for k, v in value.items() }
+        return { k: _value(args[1], v) for k, v in value.items() }
 
-    def _intrinsic(T, value):
+    return _document(T, value)
+
+def encode(T : type, value : Any) -> Dataspec:
+    def _value(T : type, value : Any) -> Any:
         if T in [str, int, float]: return _simple(T, value)
-        if not isinstance(T, types.GenericAlias):
-            raise TypeError('Non-simple types must be parameterized')
-        if T.__origin__ == list: return _list(T, value)
-        if T.__origin__ == dict: return _dict(T, value)
+        return _document(T, value)
+
+    def _composite(T : type, value : Any) -> Any:
+        if '__origin__' in T.__dict__:
+            if T.__dict__['__origin__'] == list: return _list(T, value)
+            if T.__dict__['__origin__'] == dict: return _dict(T, value)
         raise TypeError('Unsupported dataspec type %s' % T.__name__)
 
-    if not is_dataclass(T): return _intrinsic(T, value)
-    if not isinstance(value, dict):
-        raise TypeError('Expected a type of dict but got %s for value \"%s\"' % (
-            type(value).__name__, str(value)
-        ))
-    result = {}
-    for l, t in signature(T).parameters.items():
-        if l not in value:
-            raise TypeError('Expected dict to define field %s' % l)
-        result[l] = decode(t.annotation, value[l])
-    return T(**result)
+    def _document(T : type, value : Any) -> Any:
+        if not is_dataclass(T): return _composite(T, value)
+        result : Dict[str, Any] = {}
+        for l, t in signature(T).parameters.items():
+            if l not in value.__dict__:
+                raise TypeError('Expected dataclass to define field %s' % l)
+            result[l] = _value(t.annotation, value.__dict__[l])
+        return result
 
-def encode(T, value):
-    def _simple(T, value):
+    def _simple(T : type, value : Any) -> Any:
         S = type(value)
         if T == S: return value
-        raise TypeError('Expected a type of %s but got %s for value \"%s\"' % (
+        raise TypeError(
+            'Expected a type of %s but got %s for value \"%s\"' % (
             T.__name__, S.__name__, str(value)
         ))
 
-    def _list(T, value):
+    def _list(T : type, value : Any) -> Any:
         if not isinstance(value, list):
-            raise TypeError('Expected a type of list[T] but got %s for value \"%s\"' % (
+            raise TypeError(
+                'Expected a type of List[T] but got %s for value \"%s\"' % (
                 type(value).__name__, str(value)
             ))
-        args = T.__args__
+        value = cast(List[Any], value)
+        args = get_args(T)
         if len(args) != 1:
             raise TypeError('Expected list type to have exactly one parameter')
-        return [ encode(args[0], item) for item in value ]
+        return [ _value(args[0], item) for item in value ]
 
-    def _dict(T, value):
+    def _dict(T : type, value : Any) -> Any:
         if not isinstance(value, dict):
-            raise TypeErro('Expected a type of dict[str, T] but got %s for value \"%s\"' % (
+            raise TypeError(
+                'Expected a type of dict[str, T] '
+                'but got %s for value \"%s\"' % (
                 type(value).__name__, str(value)
             ))
-        args = T.__args__
+        value = cast(Dict[Any, Any], value)
+        args = get_args(T)
         if len(args) != 2:
             raise TypeError('Expected dict type to have exactly two parameters')
         if args[0] != str:
-            raise TypeError('Expected type to be str but got %s' % (
+            raise TypeError(
+                'Expected type to be str but got %s' % (
                 args[0].__name__
             ))
         for key in value.keys():
             if isinstance(key, str): continue
-            raise TypeError('Expected key %s to be of type %s but got %s' % (
+            raise TypeError(
+                'Expected key %s to be of type %s but got %s' % (
                 key, str.__name__, type(key).__name__
             ))
-        return { k: encode(args[1], v) for k, v in value.items() }
+        return { k: _value(args[1], v) for k, v in value.items() }
 
-    def _intrinsic(T, value):
-        if T in [str, int, float]: return _simple(T, value)
-        if not isinstance(T, types.GenericAlias):
-            raise TypeError('Non-simple types must be parameterized')
-        if T.__origin__ == list: return _list(T, value)
-        if T.__origin__ == dict: return _dict(T, value)
-        raise TypeError('Unsupported dataspec type %s' % T.__name__)
-
-    if not is_dataclass(T): return _intrinsic(T, value)
-    result = {}
-    for l, t in signature(T).parameters.items():
-        if l not in value.__dict__:
-            raise TypeError('Expected dataclass to define field %s' % l)
-        result[l] = encode(t.annotation, value.__dict__[l])
-    return result
+    return _document(T, value)
