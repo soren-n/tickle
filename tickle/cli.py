@@ -1,4 +1,14 @@
 # External module dependencies
+from typing import (
+    Any,
+    ParamSpec,
+    TypeVar,
+    Generic,
+    Optional,
+    Callable,
+    Tuple,
+    Dict
+)
 from threading import Thread
 from pathlib import Path
 import logging
@@ -11,26 +21,30 @@ from . import log
 ###############################################################################
 # Defaults
 ###############################################################################
-def default_log_path(dir_path = Path('./')):
+def default_log_path(dir_path : Path = Path('./')) -> Path:
     return Path(dir_path, 'tickle.log')
 
 ###############################################################################
 # Async runner
 ###############################################################################
-class Runner(Thread):
+P = ParamSpec('P')
+R = TypeVar('R')
+class Runner(Generic[P, R], Thread):
     def __init__(self):
         super().__init__()
-        self._func = None
-        self._args = None
-        self._result = None
+        self._func : Optional[Callable[P, R]] = None
+        self._args : Optional[Tuple[Any, ...]] = None
+        self._kargs : Optional[Dict[str, Any]] = None
+        self._result : Optional[R] = None
 
     def run(self):
+        if self._func == None: return
         self._result = self._func(
-            *self._args,
-            **self._kargs
+            *(self._args if self._args != None else []),
+            **(self._kargs if self._kargs != None else {})
         )
 
-    def start(self, func, *args, **kargs):
+    def start(self, func : Callable[P, R], *args : Any, **kargs : Any):
         self._func = func
         self._args = args
         self._kargs = kargs
@@ -47,7 +61,7 @@ def main():
     import argparse
     import sys
 
-    def _app(args):
+    def _app(args : argparse.Namespace) -> bool:
         cwd = Path.cwd()
 
         # Check if in version mode
@@ -83,9 +97,13 @@ def main():
                 Path(cwd, args.cache),
                 args.workers
             )
+            if evaluator == None:
+                raise RuntimeError(
+                    'Failed to initialize online evaluator!'
+                )
 
             # Setup user termination
-            def _terminate(*args):
+            def _terminate(*args : Any):
                 log.info('Ctrl-C registered; terminating ...')
                 evaluator.stop()
 
@@ -99,7 +117,9 @@ def main():
             return True
 
         if args.mode == 'clean':
-            return api.clean(cwd, Path(cwd, args.cache) )
+            return api.clean(cwd, Path(cwd, args.cache))
+
+        raise RuntimeError('Unknown mode \"%s\"' % args.mode)
 
     parser = argparse.ArgumentParser(
         prog = 'tickle',
