@@ -8,21 +8,21 @@ from .evaluate import Task, Program, Batch
 # Functions
 ###############################################################################
 def has_cycle(worklist : List[Task]):
-    def _visit(task : Task, path : List[Task], visited : Set[Task]) -> bool:
-        if task in visited: return False
-        if task in path: return True
-        _path = path.copy()
-        _path.append(task)
-        _visited = visited.copy()
-        _visited.add(task)
-        for dep in task.get_deps():
-            if _visit(dep, _path, _visited): return True
-        return False
-
-    visited : Set[Task] = set()
-    for task in worklist:
-        if _visit(task, list(), visited): return True
-        visited.add(task)
+    checked : Set[Task] = set()
+    for root_node in worklist:
+        path : List[Task] = [root_node]
+        stack : List[List[Task]] = [list(root_node.get_deps())]
+        while len(stack) != 0:
+            node_deps = stack[-1]
+            if len(node_deps) == 0:
+                checked.add(path.pop(-1))
+                stack.pop(-1)
+                continue
+            node_dep = node_deps.pop(0)
+            if node_dep in checked: continue
+            if node_dep in path: return True
+            path.append(node_dep)
+            stack.append(list(node_dep.get_deps()))
     return False
 
 Graph = List[Task]

@@ -139,17 +139,17 @@ def _update_depend(
         agenda_data : agenda.CompiledAgenda,
         depend_data : depend.CompiledDepend
         ) -> Set[str]:
-        return Set[str].union(*[
-            { str(output) for output in task_data.outputs }
-            for task_data in agenda_data
-        ]).union({
-            str(src_path)
-            for src_path in depend_data.keys()
-        })
+        return Set[str].union(
+            { str(src_path) for src_path in depend_data.keys() }, *[
+                { str(output) for output in task_data.outputs }
+                for task_data in agenda_data
+            ]
+        )
 
     def _explicits(
         agenda_data : agenda.CompiledAgenda
         ) -> Set[str]:
+        if len(agenda_data) == 0: return set()
         return Set[str].union(*[
             Set[str].union(
                 { str(input) for input in task_data.inputs },
@@ -175,29 +175,30 @@ def _update_depend(
         return result
 
     def _has_cycle(
-        worklist : List[str],
         graph : Dict[str, Set[str]]
         ) -> bool:
-        def _visit(
-            node : str,
-            path : List[str],
-            visited : Set[str]
-            ) -> bool:
-            if node in visited: return False
-            if node in path: return True
-            _path = path.copy()
-            _path.append(node)
-            _visited = visited.copy()
-            _visited.add(node)
-            if node not in graph: return False
-            for dep in graph[node]:
-                if _visit(dep, _path, _visited): return True
-            return False
-
-        visited : Set[str] = set()
-        for node in worklist:
-            if _visit(node, [], visited): return True
-            visited.add(node)
+        def _get_deps(node : str) -> List[str]:
+            if node not in graph: return []
+            return list(graph[node])
+        worklist = list(filter(
+            lambda node: len(graph[node]) == 0,
+            graph.keys()
+        ))
+        checked : Set[str] = set()
+        for root_node in worklist:
+            path : List[str] = [root_node]
+            stack : List[List[str]] = [_get_deps(root_node)]
+            while len(stack) != 0:
+                node_deps = stack[-1]
+                if len(node_deps) == 0:
+                    checked.add(path.pop(-1))
+                    stack.pop(-1)
+                    continue
+                node_dep = node_deps.pop(0)
+                if node_dep in checked: continue
+                if node_dep in path: return True
+                path.append(node_dep)
+                stack.append(_get_deps(node_dep))
         return False
 
     def _reachable(
@@ -251,13 +252,12 @@ def _update_depend(
             worklist += refs[node] if node in refs else set()
         return result
 
-    # Find agenda sources and check for cycles against depend
-    nodes : List[str] = list(_outputs(agenda_data, depend_data))
+    # Check for cycles against depend
     deps : Dict[str, Set[str]] = _join_graphs(agenda_data, depend_data)
-    if _has_cycle(nodes[:], deps):
-        raise RuntimeError('Cycle found in depend!')
+    if _has_cycle(deps): raise RuntimeError('Cycle found in depend!')
 
     # Find dependency closures
+    nodes : List[str] = list(_outputs(agenda_data, depend_data))
     depend_closures : Dict[str, Set[str]] = dict()
     alive : List[str] = _reachable(nodes[:], deps)
     ordered_depends = _topological_order(
@@ -675,6 +675,7 @@ class OnlineEvaluator(Evaluator):
         def _agenda_explicits(
             agenda_data : agenda.CompiledAgenda
             ) -> Set[str]:
+            if len(agenda_data) == 0: return set()
             return Set[str].union(*[
                 { str(input) for input in task_data.inputs }
                 for task_data in agenda_data
