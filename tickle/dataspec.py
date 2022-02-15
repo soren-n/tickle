@@ -1,6 +1,6 @@
 # External module dependencies
 from dataclasses import is_dataclass
-from typing import cast, get_args, Any, Union, List, Dict
+from typing import cast, get_origin, get_args, Any, Union, List, Dict
 from inspect import signature
 
 ###############################################################################
@@ -24,9 +24,10 @@ def decode(T : type, value : Any) -> Any:
         return _document(T, value)
 
     def _composite(T : type, value : Any) -> Any:
-        if '__origin__' in T.__dict__:
-            if T.__dict__['__origin__'] == list: return _list(T, value)
-            if T.__dict__['__origin__'] == dict: return _dict(T, value)
+        origin = get_origin(T)
+        if origin != None:
+            if origin == list: return _list(T, value)
+            if origin == dict: return _dict(T, value)
         raise TypeError('Unsupported dataspec type %s' % T.__name__)
 
     def _document(T : type, value : Any) -> Any:
@@ -98,9 +99,10 @@ def encode(T : type, value : Any) -> Dataspec:
         return _document(T, value)
 
     def _composite(T : type, value : Any) -> Any:
-        if '__origin__' in T.__dict__:
-            if T.__dict__['__origin__'] == list: return _list(T, value)
-            if T.__dict__['__origin__'] == dict: return _dict(T, value)
+        origin = get_origin(T)
+        if origin != None:
+            if origin == list: return _list(T, value)
+            if origin == dict: return _dict(T, value)
         raise TypeError('Unsupported dataspec type %s' % T.__name__)
 
     def _document(T : type, value : Any) -> Any:
