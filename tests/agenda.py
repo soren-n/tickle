@@ -98,7 +98,7 @@ def agenda() -> q.Sampler[Agenda]:
             if proc_name in result.procs: continue
             result.procs[proc_name] = [
                 'python3',
-                '../../../tasks/success.py',
+                '../../tasks/success.py',
                 '-i', '$inputs',
                 '-o', '$outputs'
             ]
