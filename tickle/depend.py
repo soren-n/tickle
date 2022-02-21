@@ -15,6 +15,9 @@ CompiledDepend = Dict[Path, Set[Path]]
 ###############################################################################
 # Functions
 ###############################################################################
+def empty() -> Depend:
+    return {}
+
 def load(depend_path : Path) -> Depend:
     with depend_path.open('r') as depend_file:
         raw_data = yaml.safe_load(depend_file)

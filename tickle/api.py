@@ -130,9 +130,7 @@ def _make_graph(
 
 def _update_depend(
     agenda_data : agenda.CompiledAgenda,
-    depend_data : depend.CompiledDepend,
-    watcher : FileWatcher,
-    cache : Cache
+    depend_data : depend.CompiledDepend
     ) -> Tuple[Set[str], Dict[str, Set[str]]]:
 
     def _outputs(
@@ -257,13 +255,13 @@ def _update_depend(
     if _has_cycle(deps): raise RuntimeError('Cycle found in depend!')
 
     # Find dependency closures
-    nodes : List[str] = list(_outputs(agenda_data, depend_data))
-    depend_closures : Dict[str, Set[str]] = dict()
-    alive : List[str] = _reachable(nodes[:], deps)
+    outputs : List[str] = list(_outputs(agenda_data, depend_data))
+    alive : List[str] = _reachable(outputs[:], deps)
     ordered_depends = _topological_order(
         _leafs(alive, deps), deps,
         _inverse_graph_alive(alive, deps)
     )
+    depend_closures : Dict[str, Set[str]] = dict()
     for src_file in ordered_depends:
         if src_file not in deps:
             depend_closures[src_file] = set()
@@ -370,19 +368,25 @@ def _make_schedule(
     for index in _topological_order(leafs, deps, refs):
         task_data = agenda_data[index]
 
-        # Check for file existance and output generation
-        for input in task_data.inputs:
-            if input.exists(): continue
-            if str(input) in outputs: continue
+        # Skip tasks without outputs
+        if len(task_data.outputs) == 0:
             log.error('Skipping task \"%s\"' % task_data.description)
-            log.debug(
-                'Task input \"%s\" does not exist and will not '
-                'be generated during task graph evaluation.' % (
-                    input.relative_to(target_dir)
-                )
-            )
+            log.debug('Task have no outputs')
             tasks[index].set_active(False)
-            break
+        else:
+            # Check for file existance and output generation
+            for input_path in task_data.inputs:
+                if input_path.exists(): continue
+                if str(input_path) in outputs: continue
+                log.error('Skipping task \"%s\"' % task_data.description)
+                log.debug(
+                    'Task input \"%s\" does not exist and will not '
+                    'be generated during task graph evaluation.' % (
+                        input_path.relative_to(target_dir)
+                    )
+                )
+                tasks[index].set_active(False)
+                break
 
         # Task is possible collect ouputs
         outputs = Set[str].union(outputs, {
@@ -392,6 +396,7 @@ def _make_schedule(
     # Check input closure
     for index, task in enumerate(tasks):
         if index >= task_count: continue
+        if not tasks[index].get_active(): continue
         task_name = 'task%d' % index
         task_data = agenda_data[index]
         prev_hashes = cache['hashes'][task_name]
@@ -495,19 +500,13 @@ class OfflineEvaluator(Evaluator):
         self.resume()
 
     def _update_depend(self):
-        depend_data = (
-            depend.compile(
-                self._depend_path,
-                depend.load(self._depend_path)
-            )
-            if self._depend_path.exists() else {}
+        depend_data = depend.compile(
+            self._depend_path,
+            depend.load(self._depend_path)
+            if self._depend_path.exists() else
+            depend.empty()
         )
-        _, closures = _update_depend(
-            self._agenda_data,
-            depend_data,
-            self._watcher,
-            self._cache
-        )
+        _, closures = _update_depend(self._agenda_data, depend_data)
         self.reprogram(_make_schedule(
             self._target_dir,
             self._tasks,
@@ -690,12 +689,11 @@ class OnlineEvaluator(Evaluator):
             agenda.load(self._agenda_path)
         )
         self._update_explicits(_agenda_explicits(self._agenda_data))
-        self._depend_data = (
-            depend.compile(
-                self._depend_path,
-                depend.load(self._depend_path)
-            )
-            if self._depend_path.exists() else {}
+        self._depend_data = depend.compile(
+            self._depend_path,
+            depend.load(self._depend_path)
+            if self._depend_path.exists() else
+            depend.empty()
         )
 
         # Remake graph and schedule
@@ -705,10 +703,7 @@ class OnlineEvaluator(Evaluator):
             self._cache
         )
         implicits, self._closures = _update_depend(
-            self._agenda_data,
-            self._depend_data,
-            self._watcher,
-            self._cache
+            self._agenda_data, self._depend_data
         )
         self._update_implicits(implicits)
         self.reprogram(_make_schedule(
@@ -725,10 +720,7 @@ class OnlineEvaluator(Evaluator):
             depend.load(self._depend_path)
         )
         implicits, self._closures = _update_depend(
-            self._agenda_data,
-            self._depend_data,
-            self._watcher,
-            self._cache
+            self._agenda_data, self._depend_data
         )
         self._update_implicits(implicits)
         self.reprogram(_make_schedule(
