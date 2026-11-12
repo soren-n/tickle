@@ -12,7 +12,7 @@ Think of tickle as a generalised version of [ninja](https://github.com/ninja-bui
 Tickle takes as input a description of tasks to be performed and their dependencies; this is in the form of two files: _agenda_ and _depend_. It then compiles an evaluation schedule for these tasks; checking their input and output files for changes against a persistent cache, as well as checking status of task dependencies. I.e. only tasks that need to or can be re/evaluated will be scheduled.
 
 # Install
-Tickle is currently only supported for Python >=3.9, although it might work with older versions. It is distributed with pip and can be installed with the following example command:
+Tickle requires Python >=3.11. It is distributed with pip and can be installed with the following example command:
 ```
 $ python3 -m pip install tickle-soren-n
 ```
@@ -52,29 +52,26 @@ positional arguments:
                         Offline mode for an inattentive evaluation mode where file
                         modifications are ignored once tasks have been scheduled. Online
                         mode for an attentive evaluation mode where file creations or
-                        modifications trigger a rescheduling of the task graph. Clean mode
-                        will delete all files and folders generated during offline or
-                        online evaluation. Version mode will print the tool version.
+                        modifications trigger a rescheduling of the task graph. Clean
+                        mode will delete all files and folders generated during offline
+                        or online evaluation. Version mode will print the tool version.
 
-optional arguments:
+options:
   -h, --help            show this help message and exit
   --debug               Sets debug logging level for tool messages (default: False)
-  -w WORKERS, --workers WORKERS
+  -w, --workers WORKERS
                         The number of concurrent workers; defaults to the number of
-                        logical cores minus one for the main thread (default: e.g. 3)
-  -a AGENDA, --agenda AGENDA
-                        Agenda YAML file location; contains the procedure and task
+                        logical cores minus one for the main thread (default: e.g. 7)
+  -a, --agenda AGENDA   Agenda YAML file location; contains the procedure and task
                         definitions, file path must be relative to current working
                         directory (default: agenda.yaml)
-  -d DEPEND, --depend DEPEND
-                        Depend YAML file location; contains a map of dynamic task
-                        dependencies, this file is optional, file path must be relative to
-                        current working directory (default: depend.yaml)
-  -c CACHE, --cache CACHE
-                        Binary cache file location; contains inter-run persistent data,
-                        file path must be relative to current working directory (default:
-                        tickle.cache)
-  -l LOG, --log LOG     Log file location; contains runtime messages, file path must be
+  -d, --depend DEPEND   Depend YAML file location; contains a map of dynamic task
+                        dependencies, this file is optional, file path must be relative
+                        to current working directory (default: depend.yaml)
+  -c, --cache CACHE     Binary cache file location; contains inter-run persistent data,
+                        file path must be relative to current working directory
+                        (default: tickle.cache)
+  -l, --log LOG         Log file location; contains runtime messages, file path must be
                         relative to current working directory (default: tickle.log)
 ```
 The CLI has two additional modes to offline/online:
@@ -95,97 +92,76 @@ Where `MODE` is one of offline, online, clean or version.
 The API is accessible in case you wish to run one of the evaluation modes as part of your workflow scripts; rather than spawning a subprocess for tickle.
 The basic setup is that your script generates an agenda, stores it, and then runs tickle through the api.
 
+All paths given to the API must be absolute, and the agenda, depend and cache paths must lie within the target directory. Each mode also takes an optional `worker_count`, which defaults to the number of logical cores minus one.
+
 For example running tickle in offline mode could look something like this:
 ```Python
+from pathlib import Path
+
 import tickle.api as tickle_api
 from tickle import agenda
 
-def _my_workflow(target_dir):
+def my_workflow(target_dir: Path) -> bool:
 
     # Paths
     agenda_path = tickle_api.default_agenda_path(target_dir)
     depend_path = tickle_api.default_depend_path(target_dir)
     cache_path = tickle_api.default_cache_path(target_dir)
-    log_path = tickle_api.default_log_path(target_dir)
 
     # Make and store agenda
-    agenda_data = _make_agenda(target_dir)
+    agenda_data = make_agenda(target_dir)
     agenda.store(agenda_path, agenda_data)
 
-    # Run tickle offline
-    success = tickle_api.offline(
+    # Run tickle offline; returns whether every task succeeded
+    return tickle_api.offline(
         target_dir,
         agenda_path,
         depend_path,
-        cache_path,
-        log_path
+        cache_path
     )
-
-    # Done
-    return success
 ```
 
-In the case of running tickle in online mode, you will need to do so async or concurrently, could look something like this:
+In online mode, `tickle_api.online` returns an evaluator instead of running it. Its `start` method blocks until `stop` is called, so run it in a thread of its own:
 ```Python
+from pathlib import Path
+from threading import Thread
+
 import tickle.api as tickle_api
 from tickle import agenda
 
-class Runner(Thread):
-    def __init__(self):
-        super().__init__()
-        self._func = None
-        self._args = None
-        self._result = None
-
-    def run(self):
-        self._result = self._func(
-            *self._args,
-            **self._kargs
-        )
-
-    def start(self, func, *args, **kargs):
-        self._func = func
-        self._args = args
-        self._kargs = kargs
-        super().start()
-
-    def join(self):
-        super().join()
-        return self._result
-
-def _my_workflow(target_dir):
+def my_workflow(target_dir: Path) -> None:
 
     # Paths
     agenda_path = tickle_api.default_agenda_path(target_dir)
     depend_path = tickle_api.default_depend_path(target_dir)
     cache_path = tickle_api.default_cache_path(target_dir)
-    log_path = tickle_api.default_log_path(target_dir)
 
     # Make and store agenda
-    agenda_data = _make_agenda(target_dir)
+    agenda_data = make_agenda(target_dir)
     agenda.store(agenda_path, agenda_data)
 
-    # Run tickle online
-    runner = Runner()
-    runner.start(
-        tickle_api.online,
+    # Make the online evaluator; None if the agenda file is missing
+    evaluator = tickle_api.online(
         target_dir,
         agenda_path,
         depend_path,
-        cache_path,
-        log_path
+        cache_path
     )
+    if evaluator is None: return
 
-    # Do other stuff, e.g. modify agenda
+    # Run it in the background
+    runner = Thread(target = evaluator.start)
+    runner.start()
+
+    # Do other stuff, e.g. modify the agenda or the input files
     ...
 
-    # Setop the runner
-    runner.stop()
-    success = runner.join()
-
-    # Done
-    return success
+    # Stop the evaluator
+    evaluator.stop()
+    runner.join()
 ```
+
+To remove the generated files again, call `tickle_api.clean(target_dir, cache_path)`.
 
 TODO: Make full documentation for API
 
@@ -265,4 +241,11 @@ The example project named hello_world is a simple C++ build example. To build th
 ```
 $ cd tickle/examples/hello_world
 $ tickle online
+```
+
+# Development
+The project is managed with [uv](https://docs.astral.sh/uv/). The tests are property-based, written with [Minigun](https://github.com/soren-n/minigun-py), and require Python >=3.12:
+```
+$ uv sync
+$ uv run minigun --time-budget 60
 ```
