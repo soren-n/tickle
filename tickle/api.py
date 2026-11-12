@@ -605,10 +605,16 @@ class OnlineEvaluator(Evaluator):
         self._watcher.subscribe(depend_path, self._event_depend)
 
     def _event_agenda(self, event : Event):
-        if event != Event.Modified:
-            raise RuntimeError('Unexpected file event %s' % event)
+        # Editors that save by writing a new file and renaming it over the
+        # agenda report creations and moves rather than modifications, so
+        # every event is judged by the agenda's content.
         agenda_hash = _hash(self._agenda_path)
         if self._agenda_hash == agenda_hash: return
+        if agenda_hash is None:
+            log.error('%s was removed, keeping the current schedule' % (
+                self._agenda_path.relative_to(self._target_dir)
+            ))
+            return
         self._agenda_hash = agenda_hash
         log.info('%s was modified, rescheduling' % (
             self._agenda_path.relative_to(self._target_dir)
