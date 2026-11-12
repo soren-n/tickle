@@ -1,6 +1,6 @@
 # External module dependencies
 from typing import Callable, Optional, List, Dict, Set
-from threading import Thread
+from threading import Event, Thread
 from queue import Queue, Empty
 from time import sleep
 
@@ -102,7 +102,10 @@ class Worker(Thread):
         super().__init__()
         self._dequeue = dequeue
         self._index = index
-        self._running = False
+        # Set by stop(), which may be called before run() is scheduled; a
+        # flag that run() initialised itself could then overwrite the stop
+        # and leave the worker looping forever.
+        self._stopped = Event()
 
     def _work(self, sequence : List[Task]):
         for task in sequence:
@@ -110,12 +113,11 @@ class Worker(Thread):
             if output: log.debug('Worker %d: %s' % (self._index, output))
 
     def run(self):
-        self._running = True
-        while self._running:
+        while not self._stopped.is_set():
             self._dequeue(self._work)
 
     def stop(self):
-        self._running = False
+        self._stopped.set()
 
 Batch = List[Task]
 Program = List[List[Batch]]
