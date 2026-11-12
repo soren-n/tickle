@@ -44,6 +44,9 @@ from ._agenda import (
 any_agendas = agendas(g.small_nats())
 evaluated_agendas = agendas(g.int_range(0, 12))
 
+# Worker counts from one, the most serial, to more than most agendas use
+worker_counts = g.int_range(1, 8)
+
 ###############################################################################
 # Test helpers
 ###############################################################################
@@ -81,7 +84,8 @@ def _quiet() -> Iterator[None]:
 
 def _run_offline(
     test_path: Path,
-    agenda: ta.Agenda | None = None
+    agenda: ta.Agenda | None = None,
+    workers: int | None = None
 ) -> tuple[bool, list[str]]:
     """Run offline mode, storing the agenda first if one is given; returns
     whether it succeeded and the descriptions of the tasks it ran, in the
@@ -96,7 +100,8 @@ def _run_offline(
                 test_path,
                 agenda_path,
                 test_path / 'depend.yaml',
-                test_path / 'tickle.cache'
+                test_path / 'tickle.cache',
+                tapi.default_worker_count() if workers is None else workers
             )
     finally:
         logging.disable(logging.NOTSET)
@@ -312,10 +317,13 @@ def _agenda_evaluate_offline_depend(
     })
     if not _offline(test_path, agenda): return False
 
-    # Changing it must rerun the task
+    # Changing it must rerun exactly the tasks reading that input, and the
+    # tasks after them
     header_path.write_text('after')
+    readers = [other for other in agenda.tasks if task.inputs[0] in other.inputs]
+    expected = set().union(*(_dependents(agenda, other) for other in readers))
     success, performed = _run_offline(test_path)
-    return success and task.desc in performed
+    return success and set(performed) == expected
 
 
 @context(evaluated_agendas)
@@ -330,10 +338,10 @@ def _agenda_evaluate_offline_damaged_cache(agenda: ta.Agenda) -> bool:
     )
 
 
-@context(evaluated_agendas)
+@context(evaluated_agendas, worker_counts)
 @prop('Offline evaluation starts tasks after their dependencies and earlier stages', attempts=100)
-def _agenda_evaluate_offline_order(agenda: ta.Agenda) -> bool:
-    success, performed = _run_offline(_fixture_path(), agenda)
+def _agenda_evaluate_offline_order(agenda: ta.Agenda, workers: int) -> bool:
+    success, performed = _run_offline(_fixture_path(), agenda, workers)
     if not success or len(performed) != len(agenda.tasks): return False
     started = {desc: index for index, desc in enumerate(performed)}
     tasks = {task.desc: task for task in agenda.tasks}
@@ -379,31 +387,33 @@ def _agenda_evaluate_offline_reorder(
     return success and len(performed) == 0
 
 
-@context(evaluated_agendas)
+@context(evaluated_agendas, worker_counts)
 @prop('Offline evaluation reruns a task with a missing output and the tasks after it', attempts=100)
 def _agenda_evaluate_offline_missing_output(
     agenda: ta.Agenda,
+    workers: int,
     rng: random.Random
 ) -> bool:
     assume(len(agenda.tasks) != 0)
     test_path = _fixture_path()
-    if not _offline(test_path, agenda): return False
+    if not _run_offline(test_path, agenda, workers)[0]: return False
     task = rng.choice(agenda.tasks)
     (test_path / task.outputs[0]).unlink()
-    success, performed = _run_offline(test_path)
+    success, performed = _run_offline(test_path, None, workers)
     return success and set(performed) == _dependents(agenda, task)
 
 
-@context(evaluated_agendas)
+@context(evaluated_agendas, worker_counts)
 @prop('Offline evaluation reruns changed tasks and the tasks after them', attempts=100)
 def _agenda_evaluate_offline_changed_task(
     agenda: ta.Agenda,
+    workers: int,
     change_proc: bool,
     rng: random.Random
 ) -> bool:
     assume(len(agenda.tasks) != 0)
     test_path = _fixture_path()
-    if not _offline(test_path, agenda): return False
+    if not _run_offline(test_path, agenda, workers)[0]: return False
 
     # Change a task without changing any file, so only the change itself and
     # propagation can make tasks rerun
@@ -418,7 +428,7 @@ def _agenda_evaluate_offline_changed_task(
         task.args['unused'] = ['changed']
         changed = [task]
     expected = set().union(*(_dependents(agenda, other) for other in changed))
-    success, performed = _run_offline(test_path, agenda)
+    success, performed = _run_offline(test_path, agenda, workers)
     return success and set(performed) == expected
 
 
@@ -461,10 +471,11 @@ def _add_trigger(agenda: ta.Agenda, task: ta.Task, trigger: str) -> None:
     task.args['inputs'] = task.args['inputs'] + [trigger]
 
 
-@context(evaluated_agendas)
+@context(evaluated_agendas, worker_counts)
 @prop('Offline evaluation reruns a task that failed until it succeeds', attempts=100)
 def _agenda_evaluate_offline_rerun_failed(
     agenda: ta.Agenda,
+    workers: int,
     rng: random.Random
 ) -> bool:
     assume(len(agenda.tasks) != 0)
@@ -474,20 +485,178 @@ def _agenda_evaluate_offline_rerun_failed(
     trigger_path = test_path / 'src' / 'trigger.txt'
     trigger_path.parent.mkdir(parents = True, exist_ok = True)
     trigger_path.write_text('ok')
-    if not _offline(test_path, agenda): return False
+    if not _run_offline(test_path, agenda, workers)[0]: return False
 
     # A failing run, then another one with nothing changed: the failed task
-    # must run again, and fail again
+    # must run again, and fail again, and no task after it may start
+    after = _dependents(agenda, task) - {task.desc}
     trigger_path.write_text('fail')
-    if _run_offline(test_path)[0]: return False
-    success, performed = _run_offline(test_path)
-    if success or task.desc not in performed: return False
+    success, performed = _run_offline(test_path, None, workers)
+    if success or task.desc not in performed or after & set(performed):
+        return False
+    success, performed = _run_offline(test_path, None, workers)
+    if success or task.desc not in performed or after & set(performed):
+        return False
 
     # Once it can succeed, it and every task after it run; the content
     # differs from the last successful run, which would need no rerun
     trigger_path.write_text('ok again')
-    success, performed = _run_offline(test_path)
+    success, performed = _run_offline(test_path, None, workers)
     return success and _dependents(agenda, task) <= set(performed)
+
+
+@context(g.int_range(1, 4), worker_counts)
+@prop('Offline evaluation reruns a task whose input changed while it ran', attempts=30)
+def _agenda_evaluate_offline_edit_during_run(
+    chain_length: int,
+    workers: int
+) -> bool:
+    # A chain of tasks; the first reads src/live.txt and appends to it after
+    # reading, as a user saving the file while the task runs would
+    script = [sys.executable, str(SUCCESS_SCRIPT), '-i', '$inputs', '-o', '$outputs']
+    agenda = ta.Agenda(
+        procs = {'edit': script + ['--append', 'src/live.txt'], 'proc': script},
+        flows = {'flow': [['edit', 'proc']]}
+    )
+    for index in range(chain_length):
+        inputs = ['src/live.txt'] if index == 0 else ['temp/file_%d.txt' % (index - 1)]
+        outputs = ['temp/file_%d.txt' % index]
+        agenda.tasks.append(ta.Task(
+            desc = 'Task %d' % index, proc = 'edit' if index == 0 else 'proc',
+            flows = ['flow'], args = {'inputs': inputs, 'outputs': outputs},
+            inputs = inputs, outputs = outputs
+        ))
+    test_path = _fixture_path()
+    (test_path / 'src').mkdir()
+    (test_path / 'src' / 'live.txt').write_text('live')
+    if not _run_offline(test_path, agenda, workers)[0]: return False
+
+    # The task read the file before the edit, so it is out of date, and its
+    # output changes, so the whole chain runs again
+    success, performed = _run_offline(test_path, None, workers)
+    return success and set(performed) == {task.desc for task in agenda.tasks}
+
+
+def _clean_build(test_path: Path, agenda: ta.Agenda, workers: int) -> Path | None:
+    """Build the agenda from scratch next to the sources of test_path, and
+    return where, or None if that build fails."""
+    clean_path = _fixture_path() / 'clean'
+    clean_path.mkdir()
+    for name in ['src', 'hdr']:
+        if (test_path / name).exists():
+            shutil.copytree(test_path / name, clean_path / name)
+    if (test_path / 'depend.yaml').exists():
+        shutil.copy(test_path / 'depend.yaml', clean_path / 'depend.yaml')
+    if not _run_offline(clean_path, agenda, workers)[0]: return None
+    return clean_path
+
+
+@context(evaluated_agendas, worker_counts, g.int_range(1, 6))
+@prop('Offline evaluation after random changes and failures matches a clean build', attempts=30)
+def _agenda_evaluate_offline_matches_clean_build(
+    agenda: ta.Agenda,
+    workers: int,
+    step_count: int,
+    rng: random.Random
+) -> bool:
+    """The outputs of the test task are a digest of everything it read, so
+    any missed rerun leaves an output different from a clean build's."""
+    assume(len(agenda.tasks) != 0)
+    test_path = _fixture_path()
+    counter = iter(range(1000000))
+
+    def _write(rel_path: str, text: str) -> None:
+        path = test_path / rel_path
+        path.parent.mkdir(parents = True, exist_ok = True)
+        path.write_text(text)
+
+    def _fresh() -> str:
+        return 'content %d' % next(counter)
+
+    # Sources for some tasks, a few headers, and a trigger that makes one
+    # task fail without changing its definition
+    sources: list[str] = []
+    for index, task in enumerate(agenda.tasks):
+        if not rng.choice([True, False]): continue
+        source = 'src/source_%d.txt' % index
+        task.inputs.append(source)
+        task.args['inputs'] = task.args['inputs'] + [source]
+        sources.append(source)
+    headers = ['hdr/header_%d.txt' % index for index in range(3)]
+    trigger_task = rng.choice(agenda.tasks)
+    _add_trigger(agenda, trigger_task, 'src/trigger.txt')
+
+    def _random_depend() -> tdep.Depend:
+        # Inputs depend on headers, and headers on later headers, so the
+        # depend file never has a cycle
+        files = sources + [
+            output for task in agenda.tasks for output in task.outputs
+        ]
+        result: tdep.Depend = {}
+        for file in files:
+            if rng.choice([True, False]): continue
+            result[file] = rng.sample(headers, rng.randint(1, len(headers)))
+        for index, header in enumerate(headers[:-1]):
+            if rng.choice([True, False]): continue
+            result[header] = [rng.choice(headers[index + 1:])]
+        return result
+
+    for file in sources + headers: _write(file, _fresh())
+    _write('src/trigger.txt', 'ok')
+    tdep.store(test_path / 'depend.yaml', _random_depend())
+    if not _run_offline(test_path, agenda, workers)[0]: return False
+
+    failing = False
+    for _ in range(step_count):
+        action = rng.choice([
+            'source', 'header', 'depend', 'output', 'reorder',
+            'args', 'proc', 'fail', 'unfail', 'move'
+        ])
+        if action == 'source' and len(sources) != 0:
+            _write(rng.choice(sources), _fresh())
+        elif action == 'header':
+            _write(rng.choice(headers), _fresh())
+        elif action == 'depend':
+            tdep.store(test_path / 'depend.yaml', _random_depend())
+        elif action == 'output':
+            path = test_path / rng.choice(agenda.tasks).outputs[0]
+            if path.exists(): path.unlink()
+        elif action == 'reorder':
+            rng.shuffle(agenda.tasks)
+        elif action == 'args':
+            rng.choice(agenda.tasks).args['unused'] = [_fresh()]
+        elif action == 'proc':
+            proc = rng.choice(list(agenda.procs))
+            agenda.procs[proc] = agenda.procs[proc] + ['--salt', _fresh()]
+        elif action == 'fail':
+            _write('src/trigger.txt', 'fail')
+            failing = True
+        elif action == 'unfail':
+            _write('src/trigger.txt', _fresh())
+            failing = False
+        elif action == 'move':
+            moved_path = _fixture_path() / 'moved'
+            shutil.copytree(test_path, moved_path)
+            test_path = moved_path
+
+        # While the trigger says fail, its task is out of date, so every run
+        # must run it and fail; otherwise every run must succeed
+        success, _ = _run_offline(test_path, agenda, workers)
+        if success == failing: return False
+
+    # Once everything can succeed: a run succeeds, the next has nothing to
+    # do, and the outputs are those of a clean build
+    _write('src/trigger.txt', _fresh())
+    if not _run_offline(test_path, agenda, workers)[0]: return False
+    success, performed = _run_offline(test_path, agenda, workers)
+    if not success or len(performed) != 0: return False
+    clean_path = _clean_build(test_path, agenda, workers)
+    if clean_path is None: return False
+    return all(
+        (test_path / output).read_text() == (clean_path / output).read_text()
+        for task in agenda.tasks
+        for output in task.outputs
+    )
 
 
 @context(evaluated_agendas)
@@ -809,6 +978,8 @@ spec = conj(
     _agenda_evaluate_offline_skip,
     _agenda_evaluate_offline_cyclic_depend,
     _agenda_evaluate_offline_rerun_failed,
+    _agenda_evaluate_offline_edit_during_run,
+    _agenda_evaluate_offline_matches_clean_build,
     _agenda_evaluate_offline_relocate,
     _agenda_evaluate_offline_depend_order,
     _program_order_respected,

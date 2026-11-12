@@ -12,7 +12,7 @@ User documentation is in `README.md`. Further docs:
 
 ```
 uv sync                                  # create .venv with runtime and dev dependencies
-uv run minigun --time-budget 60          # run the property tests (about 8 minutes)
+uv run minigun --time-budget 60          # run the property tests (about 6 minutes)
 uv run minigun --time-budget 10 --select "encode"   # run the properties whose description matches
 uv run ruff check . && uv run pyright   # lint (bug rules only) and type check
 uv run tickle offline                    # run the CLI in the current directory
@@ -51,7 +51,9 @@ To try the CLI end to end, copy `examples/hello_world` somewhere outside the rep
 - Properties that evaluate agendas start real processes, so they declare `attempts=100` and use agendas of at most 12 tasks; keep new ones similarly bounded. `_run_offline` returns the descriptions of the tasks a run performed, for properties about what reruns.
 - Properties get scratch directories from `minigun.fixture.temporary_path()` (under `.minigun/`, gitignored, removed after the run). Paths passed to the API must be absolute, so call `.resolve()` on them.
 - Wrap API calls in tests with `_quiet()` or go through `_run_offline`; tickle prints to stdout and logs failures at CRITICAL. `_run_offline` collects lines starting with `[tickle] Task `, so tasks in properties about what runs need descriptions starting with `Task `.
-- `tests/tasks/success.py` fails when an input's content is exactly `fail`; `_add_trigger` uses that to make a task fail without changing its definition.
+- `tests/tasks/success.py` writes each output as a digest of its arguments, its inputs and the files they depend on through `depend.yaml` (as a compiler reads headers), so a stale output differs from a clean build's. It fails when an input's content is exactly `fail` (`_add_trigger` uses that to make a task fail without changing its definition), ignores `--salt` words (a way to change a command), and appends to `--append` files after reading its inputs (an edit during the run).
+- The model-based property ("matches a clean build") applies random changes, failures and moves with a run after each, then compares the outputs with a clean build. It is the main guard of incremental correctness; extend its actions when adding behaviour that affects what reruns.
+- Evaluation properties take a worker count from `worker_counts` (1 to 8) and pass it to `_run_offline`; do the same in new ones, so the serial case is covered.
 - Process-free properties build `evaluate.Task` graphs directly and call `graph.compile` or drive an `Evaluator` with fake work; prefer them for scheduler behaviour, since they are fast and deterministic.
 - A new property should fail on the code it guards. Check by running it against the previous commit in a detached worktree, or against a copy of the repo with the guarded logic broken (for example propagation in `graph.propagate` removed). Generated agendas give tasks random stage bumps so stage order is not implied by dependency order; keep generators able to tell such behaviours apart.
 - Online mode has one property (outputs built, agenda edits followed, stops); check other changes to it, such as input and depend edits, by hand with the example project.
