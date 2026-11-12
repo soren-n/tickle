@@ -163,7 +163,7 @@ def my_workflow(target_dir: Path) -> None:
 
 To remove the generated files again, call `tickle_api.clean(target_dir, cache_path)`.
 
-TODO: Make full documentation for API
+See [docs/api.md](docs/api.md) for the full API reference.
 
 ## The agenda file
 The agenda file is a YAML file with the follow grammar:
@@ -200,11 +200,13 @@ tasks:
   ...
 ```
 The procs section defines a dictionary of procedures.
-A proc is defined with a name and it's implementation is a command as a list of string words.
-A command word is a parameter if it is prefixed with $.
+A proc is defined with a name and its implementation is a command as a list of string words.
+A command word is a parameter if it is prefixed with $; every other word is passed to the command exactly as written, spaces and all.
+Commands are run directly, not through a shell, so shell syntax such as pipes, redirection or globs has no special meaning; use a proc like `[ sh, -c, ... ]` if you need it.
 
 The flows section defines a list of workflows.
 A workflow is a sequence of stages. A stage is a list of procs, defining which procs are allowed to be evaluated in parallel.
+Within a workflow, every task of a stage is started only after the tasks of the earlier stages, and a task may not depend on a task of a later stage. A proc can be part of only one stage per workflow.
 This is useful when you have a clear separation in the evaluation order between groups of tasks; you could achieve the same ordering without stages, by having a many-to-many dependency between the task groups that need separating, which however would be costly on the scheduler. So stages were added as both a semantic convenience as well as an optimisation.
 
 Most likely you will only need to define one workflow; however there are cases where you would wish to evaluate two agendas in parallel, or with some overlap. In this case it is more beneficial to keep these two agenda in the same evaluation context; i.e. defining multiple workflows allows you to do that.
@@ -214,8 +216,17 @@ A task is an instantiation of a proc.
 The task description is set with the desc field.
 The proc is selected with the proc field.
 The proc parameters are given arguments via the args field.
-An arg is a list of string values to be inserted into the proc's command.
-The input and output files that the task ranges over are set with the inputs and outputs fields.
+An arg is a list of string values to be inserted into the proc's command; each value becomes one word of the command, in place of the parameter.
+The input and output files that the task ranges over are set with the inputs and outputs fields; paths are relative to the agenda file's folder.
+
+A task is rerun when:
+
+- it changed, i.e. its proc's command, its args, flows, inputs or outputs differ from the last successful run;
+- the content of an input changed, or of a file an input depends on, through other tasks or the depend file;
+- one of its outputs is missing;
+- a task it depends on is rerun.
+
+A task with an input that does not exist and that no task produces is skipped, together with the tasks that depend on it; the rest of the agenda is still evaluated.
 
 You should think of the agenda file as describing the explicit dependencies between files for a task, e.g. source file to object file in a code project build workflow.
 
@@ -230,7 +241,8 @@ The depend file is a YAML file with the following grammar:
   ...
 ...
 ```
-The file defines a dictionary of file path to list of file paths, i.e. a file path dependency graph.
+The file defines a dictionary of file path to list of file paths, i.e. a file path dependency graph; paths are relative to the depend file's folder.
+The dependencies must not form a cycle, neither among themselves nor together with the tasks of the agenda.
 
 You should think of the depend file as describing the implicit dependencies between files for a task, i.e. uncovered by scanning the content of the files; e.g. source file to header file in a code project build workflow; the source file to header file dependencies change more often during development than the task dependencies mentioned earlier, and as such should be defined in the depend file and not the agenda file.
 
@@ -249,3 +261,5 @@ The project is managed with [uv](https://docs.astral.sh/uv/). The tests are prop
 $ uv sync
 $ uv run minigun --time-budget 60
 ```
+
+See [docs/architecture.md](docs/architecture.md) for how tickle schedules and evaluates tasks, and [docs/releasing.md](docs/releasing.md) for how to cut a release.
