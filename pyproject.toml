@@ -15,7 +15,7 @@ classifiers = [
     "Intended Audience :: Developers",
     "Intended Audience :: System Administrators",
     "Operating System :: MacOS",
-    "Operating System :: Microsoft",
+    "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
@@ -39,6 +39,8 @@ tickle = "tickle.cli:main"
 dev = [
     # minigun requires Python >= 3.12; the tests run on 3.12 and later.
     "minigun-soren-n>=6.6.0; python_version >= '3.12'",
+    "pyright>=1.1.414",
+    "ruff>=0.17.5",
 ]
 
 [build-system]
@@ -53,3 +55,16 @@ include = ["tickle", "README.md", "LICENSE"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["tickle"]
+
+# Lint for bugs only; the code keeps its own formatting conventions (see
+# CLAUDE.md), so no formatter is configured and style rules are off.
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["F", "B", "E9"]
+
+[tool.pyright]
+include = ["tickle"]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
