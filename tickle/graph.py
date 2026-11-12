@@ -41,25 +41,29 @@ def get_leafs(graph : Graph):
 def get_roots(graph : Graph):
     return list(filter(lambda node: len(node.get_refs()) == 0, graph))
 
-def propagate(graph : Graph):
-    def __topological_order(worklist : List[Task]):
-        result : List[Task] = list()
-        while len(worklist) != 0:
-            node = worklist.pop(0)
-            result_set = set(result)
-            if node in result_set: continue
-            if len(node.get_deps().difference(result_set)) != 0: continue
-            worklist += node.get_refs().difference(result_set)
-            result.append(node)
-        return result
+def topological_order(graph : Graph) -> List[Task]:
+    """The tasks of an acyclic graph, each after all of its dependencies."""
+    waiting : Dict[Task, int] = {
+        node : len(node.get_deps()) for node in graph
+    }
+    result : List[Task] = get_leafs(graph)
+    index = 0
+    while index < len(result):
+        node = result[index]
+        index += 1
+        for ref in node.get_refs():
+            if ref not in waiting: continue
+            waiting[ref] -= 1
+            if waiting[ref] == 0: result.append(ref)
+    return result
 
+def propagate(graph : Graph):
     # Defensively check for cycles
     if has_cycle(graph):
         raise RuntimeError('Cycle detected in agenda!')
-    worklist = get_leafs(graph)
 
     # Propagate invalidity
-    for dst in __topological_order(worklist):
+    for dst in topological_order(graph):
         for src in dst.get_deps():
             if not src.get_valid(): dst.set_valid(False)
             if not src.get_active(): dst.set_active(False)
@@ -92,39 +96,22 @@ def compile(graph : Graph) -> Program:
             else: worklist += alive_deps
         return result
 
-    # Join sequential tasks
+    # One sequence per task. Tasks used to be joined into chains run by one
+    # worker, but a chain was filed under the flows of its first task only,
+    # which broke the stage order of the others; the ready-queue scheduler
+    # planned for 0.6.0 replaces batches and sequences altogether.
     def _join_tasks(
         worklist : List[Task],
         alive : Set[Task]
         ) -> Tuple[List[List[Task]], Dict[Task, int]]:
-        def _should_join(task : Task, alive_deps : List[Task]) -> bool:
-            if len(alive_deps) != 1: return False
-            dep = alive_deps[0]
-            if len(dep.get_refs().intersection(alive)) != 1: return False
-            dep_flows = dep.get_flows()
-            for flow, stage in task.get_flows().items():
-                if flow not in dep_flows: continue
-                if stage == dep_flows[flow]: continue
-                return False
-            return True
-
         result : List[List[Task]] = list()
         seqs : Dict[Task, int] = dict()
-        visited : Set[Task] = set()
         while len(worklist) != 0:
             task = worklist.pop(0)
-            if task in visited: continue
-            visited.add(task)
+            if task in seqs: continue
             worklist += task.get_refs().intersection(alive)
-            alive_deps = list(task.get_deps().intersection(alive))
-            if _should_join(task, alive_deps):
-                index = seqs[alive_deps[0]]
-                result[index].append(task)
-                seqs[task] = index
-            else:
-                index = len(result)
-                result.append([task])
-                seqs[task] = index
+            seqs[task] = len(result)
+            result.append([task])
         return result, seqs
 
     # Sort task seqs in topological order

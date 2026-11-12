@@ -1,5 +1,5 @@
 # External module dependencies
-from typing import Callable, Optional, List, Dict, Set
+from typing import Callable, Optional, Tuple, List, Dict, Set
 from threading import Event, Thread
 from queue import Queue, Empty
 
@@ -24,8 +24,10 @@ class Task:
     def __init__(self,
         flows : Dict[str, int],
         work : Work,
-        force : bool = False
+        force : bool = False,
+        description : str = ''
         ):
+        self.description : str = description
         self._valid : bool = False
         self._active : bool = True
         self._force : bool = force
@@ -108,7 +110,14 @@ class Worker(Thread):
 
     def _work(self, sequence : List[Task]):
         for task in sequence:
-            output = task.perform()
+            try: output = task.perform()
+            except TaskError: raise
+            except Exception as error:
+                # Report the failure against the task that raised it
+                raise TaskError(
+                    task.description or 'unknown',
+                    '%s: %s' % (type(error).__name__, error)
+                ) from error
             if output: log.debug('Worker %d: %s' % (self._index, output))
 
     def run(self):
@@ -132,8 +141,12 @@ class Evaluator:
         self._running : bool = False
         self._paused : bool = False
         self._program : Program = []
-        self._queue : Queue[List[Task]] = Queue()
-        self._exception : Queue[TaskError] = Queue()
+        # Each program gets a new generation; an error is tagged with the
+        # generation of the program its task belonged to, so a failure in
+        # an old program never cancels the program that replaced it.
+        self._generation : int = 0
+        self._queue : Queue[Tuple[int, List[Task]]] = Queue()
+        self._exception : Queue[Tuple[int, TaskError]] = Queue()
         self._pause = SingleWriteMultipleReadLock()
         self._wake = Event()
         self._workers = [
@@ -146,17 +159,17 @@ class Evaluator:
         # perform a sequence, so pause() waits for running sequences.
         self._pause.acquire_read()
         try:
-            try: work = self._queue.get(timeout = _POLL_INTERVAL)
+            try: generation, work = self._queue.get(timeout = _POLL_INTERVAL)
             except Empty: return
             try: perform(work)
             except TaskError as error:
-                self._exception.put(error)
+                self._exception.put((generation, error))
             except Exception as error:
                 # Any other failure must still be reported and accounted
                 # for, or the main loop would wait for the batch forever.
-                self._exception.put(TaskError(
+                self._exception.put((generation, TaskError(
                     'unknown', '%s: %s' % (type(error).__name__, error)
-                ))
+                )))
             finally:
                 self._queue.task_done()
                 self._wake.set()
@@ -164,15 +177,22 @@ class Evaluator:
             self._pause.release_read()
 
     def _check(self) -> bool:
-        try:
-            error = self._exception.get(block = False)
+        # Report every error that arrived, and say whether any of them came
+        # from the current program, which must then be dropped.
+        current = True
+        while True:
+            try: generation, error = self._exception.get(block = False)
+            except Empty: return current
             self._exception.task_done()
+            if generation == self._generation: current = False
             self.on_task_error(error)
-            return False
-        except Empty: return True
 
     def on_task_error(self, error : TaskError) -> None:
         raise error
+
+    def on_idle(self) -> None:
+        """Called by the main loop when it has nothing to queue."""
+        pass
 
     def _next_batch(self) -> Optional[List[Batch]]:
         # Reprogramming happens under the write side of the pause lock, so
@@ -181,7 +201,8 @@ class Evaluator:
         try:
             if len(self._program) == 0: return None
             batch = self._program.pop(0)
-            for sequence in batch: self._queue.put(sequence)
+            for sequence in batch:
+                self._queue.put((self._generation, sequence))
             return batch
         finally:
             self._pause.release_read()
@@ -202,6 +223,7 @@ class Evaluator:
                     try: self.deprogram()
                     finally: self.resume()
                 if self._next_batch() is None:
+                    self.on_idle()
                     self._wake.wait(_IDLE_INTERVAL)
                     continue
                 self._queue.join()
@@ -226,6 +248,7 @@ class Evaluator:
         if self._running and not self._paused:
             raise RuntimeError('Evaluator must be paused prior to reprogramming!')
         self._clear_queue()
+        self._generation += 1
         self._program = program
         self._wake.set()
 
