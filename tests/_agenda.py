@@ -7,6 +7,7 @@ import sys
 from minigun import generate as g
 
 from tickle.agenda import Agenda, Task
+from tickle.depend import Depend
 
 ###############################################################################
 # Constants
@@ -55,7 +56,11 @@ def _topological_order(
         yield node
 
 
-def _convert(graph_data: Graph, flows_data: list[list[bool]]) -> Agenda:
+def _convert(
+    graph_data: Graph,
+    flows_data: list[list[bool]],
+    stage_bumps: list[int]
+) -> Agenda:
 
     # Decode graph
     deps: dict[int, set[int]] = {}
@@ -78,10 +83,13 @@ def _convert(graph_data: Graph, flows_data: list[list[bool]]) -> Agenda:
             if flow_datum
         } or {0}
 
-    # Compute task depths
+    # Compute task stages: after every dependency's stage, sometimes one
+    # further, so independent tasks also end up in different stages and
+    # stage order is not implied by dependency order alone
     task_depth: dict[int, int] = {}
     for task_index in _topological_order(deps, refs):
         depth = max([-1] + [task_depth[dep] for dep in deps[task_index]]) + 1
+        if task_index < len(stage_bumps): depth += stage_bumps[task_index]
         task_depth[task_index] = depth
 
     def _proc_name(task_index: int) -> str:
@@ -152,6 +160,99 @@ def agendas(task_counts: g.Generator[int]) -> g.Generator[Agenda]:
             g.bounded_lists(
                 0, task_count,
                 g.bounded_lists(0, flow_count, g.bools())
-            )
+            ),
+            g.bounded_lists(0, task_count, g.int_range(0, 1))
         )
     return g.bind(_sized, task_counts)
+
+
+def cyclic_agendas() -> g.Generator[Agenda]:
+    """Agendas whose tasks form a ring: each task reads the previous task's
+    output, and the first reads the last's (a single task reads its own)."""
+    def _ring(task_count: int) -> Agenda:
+        def _file_path(index: int) -> str:
+            return 'temp/file_%d.txt' % (index % task_count)
+        result = Agenda()
+        result.procs['proc'] = [
+            sys.executable,
+            str(SUCCESS_SCRIPT),
+            '-i', '$inputs',
+            '-o', '$outputs'
+        ]
+        result.flows['flow'] = [['proc']]
+        for index in range(task_count):
+            _inputs = [_file_path(index - 1)]
+            _outputs = [_file_path(index)]
+            result.tasks.append(Task(
+                desc = 'Task %d' % index,
+                proc = 'proc',
+                flows = ['flow'],
+                args = {'inputs': _inputs, 'outputs': _outputs},
+                inputs = _inputs,
+                outputs = _outputs
+            ))
+        return result
+    return g.map(_ring, g.int_range(1, 6))
+
+
+###############################################################################
+# Arbitrary text
+###############################################################################
+# Any printable text, for checking that files keep exactly what was stored
+texts = g.strings()
+text_lists = g.lists(texts)
+
+
+def text_agendas() -> g.Generator[Agenda]:
+    """Agendas whose every name, path and value is arbitrary text; they are
+    well typed but not meant to compile."""
+    tasks = g.map(
+        lambda desc, proc, flows, args, inputs, outputs: Task(
+            desc = desc, proc = proc, flows = flows, args = args,
+            inputs = inputs, outputs = outputs
+        ),
+        texts, texts, text_lists, g.dicts(texts, text_lists),
+        text_lists, text_lists
+    )
+    return g.map(
+        lambda procs, flows, tasks: Agenda(
+            procs = procs, flows = flows, tasks = tasks
+        ),
+        g.dicts(texts, text_lists),
+        g.dicts(texts, g.lists(text_lists)),
+        g.lists(tasks)
+    )
+
+
+def text_depends() -> g.Generator[Depend]:
+    return g.dicts(texts, text_lists)
+
+###############################################################################
+# Command templates
+###############################################################################
+# A proc word is a literal or one of a few parameters
+Word = tuple[str, str]
+PARAMETERS = ['p0', 'p1', 'p2']
+
+
+def command_templates() -> g.Generator[tuple[list[Word], dict[str, list[str]]]]:
+    """A proc as words tagged literal or parameter, with arguments for every
+    parameter; literal words never start with $, which marks parameters."""
+    literal = g.map(lambda text: ('literal', text.lstrip('$')), texts)
+    parameter = g.map(lambda name: ('parameter', name), g.one_of(PARAMETERS))
+    arguments = g.map_dict({name: text_lists for name in PARAMETERS})
+    return g.tuples(g.lists(g.choice(literal, parameter)), arguments)
+
+###############################################################################
+# Depend files
+###############################################################################
+def cyclic_depends() -> g.Generator[Depend]:
+    """Depend files whose files form a ring of one to four files."""
+    def _ring(file_count: int) -> Depend:
+        def _file_path(index: int) -> str:
+            return 'deps/file_%d.txt' % (index % file_count)
+        return {
+            _file_path(index): [_file_path(index + 1)]
+            for index in range(file_count)
+        }
+    return g.map(_ring, g.int_range(1, 4))
