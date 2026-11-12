@@ -19,6 +19,10 @@ def main(args : argparse.Namespace) -> bool:
         if not input_path.is_file():
             logging.critical('Input path is not a file:\n%s' % input)
             return False
+        # Lets a property make a task fail without changing its definition
+        if input_path.read_text() == 'fail':
+            logging.critical('Input asked to fail:\n%s' % input)
+            return False
 
     # Create outputs
     for output in args.outputs:

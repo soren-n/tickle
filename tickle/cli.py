@@ -21,14 +21,14 @@ def main():
     import argparse
     import sys
 
-    def _app(args : argparse.Namespace) -> bool:
+    def _app(args : argparse.Namespace) -> int:
         cwd = Path.cwd()
 
         # Check if in version mode
         if args.mode == 'version':
             from . import __version__
             print(__version__)
-            return True
+            return 0
 
         # Handle logging
         logging.basicConfig(
@@ -40,13 +40,20 @@ def main():
 
         # Run specified mode
         if args.mode == 'offline':
-            return api.offline(
-                cwd,
-                Path(cwd, args.agenda),
-                Path(cwd, args.depend),
-                Path(cwd, args.cache),
-                args.workers
-            )
+            try:
+                success = api.offline(
+                    cwd,
+                    Path(cwd, args.agenda),
+                    Path(cwd, args.depend),
+                    Path(cwd, args.cache),
+                    args.workers
+                )
+            except KeyboardInterrupt:
+                # Tasks that did not finish are not recorded, so the next
+                # run performs them again
+                log.info('Interrupted; unfinished tasks run again next time')
+                return 130
+            return 0 if success else 1
         if args.mode == 'online':
 
             # Make evaluator
@@ -57,7 +64,7 @@ def main():
                 Path(cwd, args.cache),
                 args.workers
             )
-            if evaluator is None: return False
+            if evaluator is None: return 1
 
             # Setup user termination
             def _terminate(*args : Any):
@@ -71,10 +78,16 @@ def main():
             evaluator.start()
 
             # Done
-            return True
+            return 0
 
         if args.mode == 'clean':
-            return api.clean(cwd, Path(cwd, args.cache))
+            success = api.clean(
+                cwd,
+                Path(cwd, args.cache),
+                Path(cwd, args.agenda),
+                Path(cwd, args.depend)
+            )
+            return 0 if success else 1
 
         raise RuntimeError('Unknown mode \"%s\"' % args.mode)
 
@@ -129,5 +142,4 @@ def main():
         default = default_log_path(),
         help = 'Log file location; contains runtime messages, file path must be relative to current working directory'
     )
-    success = _app(parser.parse_args())
-    sys.exit(0 if success else -1)
+    sys.exit(_app(parser.parse_args()))

@@ -8,6 +8,7 @@ import os
 import time
 import logging
 import random
+import shutil
 import sys
 
 from minigun import assume, conj, context, prop
@@ -18,6 +19,8 @@ import tickle.dataspec as td
 import tickle.agenda as ta
 import tickle.api as tapi
 import tickle.depend as tdep
+import tickle.evaluate as tev
+import tickle.graph as tgraph
 
 # Internal module dependencies
 from ._agenda import (
@@ -420,7 +423,7 @@ def _agenda_evaluate_offline_changed_task(
 
 
 @context(evaluated_agendas)
-@prop('Offline evaluation skips a task with an impossible input and the tasks after it', attempts=100)
+@prop('Offline evaluation skips a task with an impossible input and the tasks after it, and fails', attempts=100)
 def _agenda_evaluate_offline_skip(
     agenda: ta.Agenda,
     rng: random.Random
@@ -431,7 +434,7 @@ def _agenda_evaluate_offline_skip(
     skipped = _dependents(agenda, task)
     test_path = _fixture_path()
     success, performed = _run_offline(test_path, agenda)
-    if not success: return False
+    if success: return False
     if set(performed) != {t.desc for t in agenda.tasks} - skipped: return False
     return all(
         (test_path / output).is_file() == (other.desc not in skipped)
@@ -449,6 +452,203 @@ def _agenda_evaluate_offline_cyclic_depend(
     test_path = _fixture_path()
     tdep.store(test_path / 'depend.yaml', depend)
     return not _offline(test_path, agenda)
+
+
+def _add_trigger(agenda: ta.Agenda, task: ta.Task, trigger: str) -> None:
+    """Give the task an extra source input that its script reads, so writing
+    'fail' into it makes the task fail without changing its definition."""
+    task.inputs.append(trigger)
+    task.args['inputs'] = task.args['inputs'] + [trigger]
+
+
+@context(evaluated_agendas)
+@prop('Offline evaluation reruns a task that failed until it succeeds', attempts=100)
+def _agenda_evaluate_offline_rerun_failed(
+    agenda: ta.Agenda,
+    rng: random.Random
+) -> bool:
+    assume(len(agenda.tasks) != 0)
+    task = rng.choice(agenda.tasks)
+    _add_trigger(agenda, task, 'src/trigger.txt')
+    test_path = _fixture_path()
+    trigger_path = test_path / 'src' / 'trigger.txt'
+    trigger_path.parent.mkdir(parents = True, exist_ok = True)
+    trigger_path.write_text('ok')
+    if not _offline(test_path, agenda): return False
+
+    # A failing run, then another one with nothing changed: the failed task
+    # must run again, and fail again
+    trigger_path.write_text('fail')
+    if _run_offline(test_path)[0]: return False
+    success, performed = _run_offline(test_path)
+    if success or task.desc not in performed: return False
+
+    # Once it can succeed, it and every task after it run; the content
+    # differs from the last successful run, which would need no rerun
+    trigger_path.write_text('ok again')
+    success, performed = _run_offline(test_path)
+    return success and _dependents(agenda, task) <= set(performed)
+
+
+@context(evaluated_agendas)
+@prop('Offline evaluation after moving the project runs no tasks', attempts=100)
+def _agenda_evaluate_offline_relocate(agenda: ta.Agenda) -> bool:
+    test_path = _fixture_path()
+    if not _offline(test_path, agenda): return False
+    moved_path = _fixture_path() / 'moved'
+    shutil.copytree(test_path, moved_path)
+    success, performed = _run_offline(moved_path)
+    return success and len(performed) == 0
+
+
+@context(g.int_range(1, 4))
+@prop('Offline evaluation orders a task after the task generating a file its depend entries name', attempts=50)
+def _agenda_evaluate_offline_depend_order(consumer_count: int) -> bool:
+    agenda = ta.Agenda()
+    agenda.procs['generate'] = [
+        sys.executable, '-c',
+        'import pathlib, sys, time; time.sleep(0.3); '
+        'path = pathlib.Path(sys.argv[1]); '
+        'path.parent.mkdir(parents = True, exist_ok = True); '
+        'path.write_text("generated")',
+        '$output'
+    ]
+    agenda.procs['consume'] = [
+        sys.executable, str(SUCCESS_SCRIPT),
+        '-i', 'gen/header.txt', '$inputs', '-o', '$outputs'
+    ]
+    agenda.flows['flow'] = [['generate', 'consume']]
+    agenda.tasks.append(ta.Task(
+        desc = 'Task generate', proc = 'generate', flows = ['flow'],
+        args = {'output': ['gen/header.txt']},
+        inputs = [], outputs = ['gen/header.txt']
+    ))
+    test_path = _fixture_path()
+    depend: tdep.Depend = {}
+    for index in range(consumer_count):
+        source = 'src/source_%d.txt' % index
+        (test_path / 'src').mkdir(exist_ok = True)
+        (test_path / source).write_text('source')
+        depend[source] = ['gen/header.txt']
+        agenda.tasks.append(ta.Task(
+            desc = 'Task consume %d' % index, proc = 'consume', flows = ['flow'],
+            args = {'inputs': [source], 'outputs': ['out/%d.txt' % index]},
+            inputs = [source], outputs = ['out/%d.txt' % index]
+        ))
+    tdep.store(test_path / 'depend.yaml', depend)
+    success, performed = _run_offline(test_path, agenda)
+    return success and performed[:1] == ['Task generate']
+
+
+def _program_order(agenda: ta.Agenda) -> dict[str, tuple[int, int, int]] | None:
+    """Compile the agenda's task graph into a program without running it, and
+    return for each task its (batch, sequence, position) in the program."""
+    compiled = ta.compile(Path('/target'), agenda)
+    tasks = [tev.Task(task.flows, lambda: None) for task in compiled]
+    producer = {
+        output: tasks[index]
+        for index, task in enumerate(compiled)
+        for output in task.outputs
+    }
+    for index, task in enumerate(compiled):
+        for input in task.inputs:
+            if input in producer: tasks[index].add_dependency(producer[input])
+    for task in tasks:
+        task.set_valid(False)
+        task.set_active(True)
+    descs = {id(task): compiled[index].description for index, task in enumerate(tasks)}
+    result: dict[str, tuple[int, int, int]] = {}
+    for batch_index, batch in enumerate(tgraph.compile(tasks)):
+        for sequence_index, sequence in enumerate(batch):
+            for position, task in enumerate(sequence):
+                desc = descs[id(task)]
+                if desc in result: return None
+                result[desc] = (batch_index, sequence_index, position)
+    return result
+
+
+@context(any_agendas)
+@prop('Compiled programs run every task once, after its dependencies and earlier stages', attempts=1000)
+def _program_order_respected(agenda: ta.Agenda) -> bool:
+    order = _program_order(agenda)
+    if order is None or len(order) != len(agenda.tasks): return False
+
+    def _before(first: str, second: str) -> bool:
+        # A task finishes before another starts if its batch is earlier, or
+        # if both run in order in the same sequence
+        batch_a, sequence_a, position_a = order[first]
+        batch_b, sequence_b, position_b = order[second]
+        if batch_a != batch_b: return batch_a < batch_b
+        return sequence_a == sequence_b and position_a < position_b
+
+    producer = {
+        output: task.desc
+        for task in agenda.tasks
+        for output in task.outputs
+    }
+    for task in agenda.tasks:
+        for input in task.inputs:
+            if input not in producer: continue
+            if not _before(producer[input], task.desc): return False
+    stage_of = {
+        (flow, proc): index
+        for flow, stages in agenda.flows.items()
+        for index, stage in enumerate(stages)
+        for proc in stage
+    }
+    for first in agenda.tasks:
+        for second in agenda.tasks:
+            for flow in set(first.flows) & set(second.flows):
+                if stage_of[(flow, first.proc)] >= stage_of[(flow, second.proc)]:
+                    continue
+                if not _before(first.desc, second.desc): return False
+    return True
+
+
+@context(g.int_range(2, 4), g.int_range(1, 3))
+@prop('A task error is reported without cancelling the next program', attempts=10)
+def _evaluator_error_keeps_next_program(
+    failure_count: int,
+    task_count: int
+) -> bool:
+    reported: list[str] = []
+    performed: list[int] = []
+
+    class _Evaluator(tev.Evaluator):
+        def on_task_error(self, error: tev.TaskError) -> None:
+            reported.append(error.description)
+
+    def _fail(index: int) -> None:
+        raise tev.TaskError('Failure %d' % index, 'failed')
+
+    evaluator = _Evaluator(4)
+    runner = Thread(target = evaluator.start, daemon = True)
+    runner.start()
+    try:
+        failing = [
+            tev.Task({'flow': 0}, (lambda index = index: _fail(index)))
+            for index in range(failure_count)
+        ]
+        evaluator.pause()
+        evaluator.reprogram(tgraph.compile(failing))
+        evaluator.resume()
+        if not _wait_for(lambda: len(reported) != 0, 5.0): return False
+
+        # A new program right after the first failure is reported, as a file
+        # save would cause; the other failures belong to the old program
+        working = [
+            tev.Task({'flow': 0}, (lambda index = index: performed.append(index)))
+            for index in range(task_count)
+        ]
+        evaluator.pause()
+        evaluator.reprogram(tgraph.compile(working))
+        evaluator.resume()
+        if not _wait_for(lambda: len(performed) == task_count, 5.0):
+            return False
+        return _wait_for(lambda: len(reported) == failure_count, 5.0)
+    finally:
+        evaluator.stop()
+        runner.join(timeout = 10)
 
 
 def _wait_for(condition, timeout: float = 20.0) -> bool:
@@ -523,13 +723,65 @@ def _agenda_clean(agenda: ta.Agenda) -> bool:
     stray_path.parent.mkdir(parents = True, exist_ok = True)
     stray_path.write_text('keep')
 
-    cache_path = test_path / 'tickle.cache'
-    with _quiet():
-        if not tapi.clean(test_path, cache_path): return False
-    if cache_path.exists(): return False
+    if not _clean(test_path): return False
+    if (test_path / 'tickle.cache').exists(): return False
     if not (test_path / 'agenda.yaml').is_file(): return False
     if stray_path.read_text() != 'keep': return False
     return not any(path.exists() for path in _outputs(test_path, agenda))
+
+
+def _clean(test_path: Path) -> bool:
+    with _quiet():
+        return tapi.clean(
+            test_path,
+            test_path / 'tickle.cache',
+            test_path / 'agenda.yaml',
+            test_path / 'depend.yaml'
+        )
+
+
+@context(evaluated_agendas)
+@prop('Clean keeps sources, files changed since they were generated, and other projects', attempts=100)
+def _agenda_clean_safe(
+    agenda: ta.Agenda,
+    rng: random.Random
+) -> bool:
+    readers = {input for task in agenda.tasks for input in task.inputs}
+    leafs = [
+        task for task in agenda.tasks
+        if not any(output in readers for output in task.outputs)
+    ]
+    assume(len(leafs) >= 2)
+    test_path = _fixture_path()
+    if not _offline(test_path, agenda): return False
+
+    # One generated file becomes a hand-written source of a new task
+    source_task, edited_task = rng.sample(leafs, 2)
+    source = source_task.outputs[0]
+    agenda.tasks.remove(source_task)
+    agenda.tasks.append(ta.Task(
+        desc = 'Copy', proc = edited_task.proc, flows = edited_task.flows,
+        args = {'inputs': [source], 'outputs': ['temp/copy.txt']},
+        inputs = [source], outputs = ['temp/copy.txt']
+    ))
+    (test_path / source).write_text('hand written')
+    if not _offline(test_path, agenda): return False
+
+    # Another generated file is edited after it was generated
+    edited = test_path / edited_task.outputs[0]
+    edited.write_text('hand edited, and longer than before')
+
+    # A copy of the project is cleaned without touching the original
+    copy_path = _fixture_path() / 'copy'
+    shutil.copytree(test_path, copy_path)
+    if not _clean(copy_path): return False
+    if not all(path.exists() for path in _outputs(test_path, agenda)):
+        return False
+
+    if not _clean(test_path): return False
+    if (test_path / source).read_text() != 'hand written': return False
+    if edited.read_text() != 'hand edited, and longer than before': return False
+    return not (test_path / 'temp' / 'copy.txt').exists()
 
 ###############################################################################
 # Specification
@@ -556,6 +808,12 @@ spec = conj(
     _agenda_evaluate_offline_changed_task,
     _agenda_evaluate_offline_skip,
     _agenda_evaluate_offline_cyclic_depend,
+    _agenda_evaluate_offline_rerun_failed,
+    _agenda_evaluate_offline_relocate,
+    _agenda_evaluate_offline_depend_order,
+    _program_order_respected,
+    _evaluator_error_keeps_next_program,
     _agenda_evaluate_online,
     _agenda_clean,
+    _agenda_clean_safe,
 )
