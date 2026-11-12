@@ -41,20 +41,27 @@ CompiledAgenda = List[CompiledTask]
 ###############################################################################
 # Functions
 ###############################################################################
+# The C parser is much faster on large agendas, when PyYAML was built with it
+YamlLoader = getattr(yaml, 'CSafeLoader', yaml.SafeLoader)
+
 def load(agenda_path : Path) -> Agenda:
     assert isinstance(agenda_path, Path)
-    with agenda_path.open('r') as agenda_file:
-        try:
-            raw_data = yaml.safe_load(agenda_file)
-            return dataspec.decode(Agenda, raw_data)
-        except (yaml.YAMLError, TypeError) as error:
-            raise RuntimeError(
-                'Invalid agenda file %s:\n%s' % (agenda_path, error)
-            ) from error
+    try:
+        with agenda_path.open('r', encoding = 'utf-8') as agenda_file:
+            raw_data = yaml.load(agenda_file, Loader = YamlLoader)
+        return dataspec.decode(Agenda, raw_data)
+    except (OSError, UnicodeDecodeError) as error:
+        raise RuntimeError(
+            'Could not read agenda file %s: %s' % (agenda_path, error)
+        ) from error
+    except (yaml.YAMLError, TypeError) as error:
+        raise RuntimeError(
+            'Invalid agenda file %s:\n%s' % (agenda_path, error)
+        ) from error
 
 def store(agenda_path : Path, agenda_data : Agenda):
     assert isinstance(agenda_data, Agenda)
-    with agenda_path.open('w+') as agenda_file:
+    with agenda_path.open('w+', encoding = 'utf-8') as agenda_file:
         raw_data = dataspec.encode(Agenda, agenda_data)
         yaml.dump(
             raw_data,
@@ -143,6 +150,12 @@ def compile(target_dir : Path, agenda_data : Agenda) -> CompiledAgenda:
                 raise RuntimeError('Undefined flow \"%s\" for task \"%s\"' % (
                     flow, task_data.desc
                 ))
+            if task_data.proc not in flow_proc_stage[flow]:
+                raise RuntimeError(
+                    'Proc \"%s\" of task \"%s\" is in no stage of flow %s' % (
+                        task_data.proc, task_data.desc, flow
+                    )
+                )
         command = _command(task_data)
         agenda.append(CompiledTask(
             hash = _task_hash(task_data, command),

@@ -4,6 +4,7 @@ from pathlib import Path
 import yaml
 
 # Internal module dependencies
+from .agenda import YamlLoader
 from . import dataspec
 
 ###############################################################################
@@ -19,18 +20,22 @@ def empty() -> Depend:
     return {}
 
 def load(depend_path : Path) -> Depend:
-    with depend_path.open('r') as depend_file:
-        try:
-            raw_data = yaml.safe_load(depend_file)
-            if raw_data is None: return {}
-            return dataspec.decode(Depend, raw_data)
-        except (yaml.YAMLError, TypeError) as error:
-            raise RuntimeError(
-                'Invalid depend file %s:\n%s' % (depend_path, error)
-            ) from error
+    try:
+        with depend_path.open('r', encoding = 'utf-8') as depend_file:
+            raw_data = yaml.load(depend_file, Loader = YamlLoader)
+        if raw_data is None: return {}
+        return dataspec.decode(Depend, raw_data)
+    except (OSError, UnicodeDecodeError) as error:
+        raise RuntimeError(
+            'Could not read depend file %s: %s' % (depend_path, error)
+        ) from error
+    except (yaml.YAMLError, TypeError) as error:
+        raise RuntimeError(
+            'Invalid depend file %s:\n%s' % (depend_path, error)
+        ) from error
 
 def store(depend_path : Path, depend_data : Depend):
-    with depend_path.open('w+') as depend_file:
+    with depend_path.open('w+', encoding = 'utf-8') as depend_file:
         raw_data = dataspec.encode(Depend, depend_data)
         yaml.dump(raw_data, depend_file)
 

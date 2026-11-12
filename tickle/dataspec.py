@@ -1,6 +1,6 @@
 # External module dependencies
 from dataclasses import is_dataclass
-from typing import cast, get_origin, get_args, Any, Union, List, Dict
+from typing import cast, get_origin, get_args, Any, Callable, Union, List, Dict
 from inspect import signature
 
 ###############################################################################
@@ -18,6 +18,25 @@ Dataspec = Union[
 ###############################################################################
 # Functions
 ###############################################################################
+class DecodeError(TypeError):
+    """A value that does not fit its type, with where it was found."""
+    def __init__(self, message : str, where : List[str]):
+        super().__init__(message)
+        self.message = message
+        self.where = where
+
+    def __str__(self) -> str:
+        if len(self.where) == 0: return self.message
+        return '%s: %s' % (''.join(self.where).lstrip('.'), self.message)
+
+def _at(where : str, decode : Callable[[], Any]) -> Any:
+    try: return decode()
+    except DecodeError as error:
+        error.where.insert(0, where)
+        raise
+    except TypeError as error:
+        raise DecodeError(str(error), [where]) from error
+
 def decode(T : type, value : Any) -> Any:
     def _value(T : type, value : Any) -> Any:
         if T in [str, int, float]: return _simple(T, value)
@@ -41,7 +60,9 @@ def decode(T : type, value : Any) -> Any:
         for l, t in signature(T).parameters.items():
             if l not in value:
                 raise TypeError('Expected dict to define field %s' % l)
-            result[l] = _value(t.annotation, value[l])
+            result[l] = _at('.%s' % l, (
+                lambda t = t, l = l: _value(t.annotation, value[l])
+            ))
         return T(**result)
 
     def _simple(T : type, value : Any) -> Any:
@@ -64,7 +85,10 @@ def decode(T : type, value : Any) -> Any:
             raise TypeError(
                 'Expected list type to have exactly one parameter'
             )
-        return [ _value(args[0], item) for item in value ]
+        return [
+            _at('[%d]' % index, (lambda item = item: _value(args[0], item)))
+            for index, item in enumerate(value)
+        ]
 
     def _dict(T : type, value : Any) -> Dict[Any, Any]:
         if not isinstance(value, dict):
@@ -89,7 +113,10 @@ def decode(T : type, value : Any) -> Any:
                 'Expected key %s to be of type %s but got %s' % (
                 key, str.__name__, type(key).__name__
             ))
-        return { k: _value(args[1], v) for k, v in value.items() }
+        return {
+            k: _at('.%s' % k, (lambda v = v: _value(args[1], v)))
+            for k, v in value.items()
+        }
 
     return _document(T, value)
 
