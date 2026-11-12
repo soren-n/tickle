@@ -99,7 +99,7 @@ def main():
     parser.add_argument(
         'mode', type = str,
         choices = ['offline', 'online', 'clean', 'version'],
-        help = 'Offline mode for an inattentive evaluation mode where file modifications are ignored once tasks have been scheduled. Online mode for an attentive evaluation mode where file creations or modifications trigger a rescheduling of the task graph. Clean mode will delete all files and folders generated during offline or online evaluation. Version mode will print the tool version.'
+        help = 'Offline mode for an inattentive evaluation mode where file modifications are ignored once tasks have been scheduled. Online mode for an attentive evaluation mode where file creations or modifications trigger a rescheduling of the task graph. Clean mode will delete the files and folders generated during offline or online evaluation, keeping files that are now sources or that changed since they were generated. Version mode will print the tool version.'
     )
     parser.add_argument(
         '--debug',

@@ -53,8 +53,10 @@ positional arguments:
                         modifications are ignored once tasks have been scheduled. Online
                         mode for an attentive evaluation mode where file creations or
                         modifications trigger a rescheduling of the task graph. Clean
-                        mode will delete all files and folders generated during offline
-                        or online evaluation. Version mode will print the tool version.
+                        mode will delete the files and folders generated during offline
+                        or online evaluation, keeping files that are now sources or that
+                        changed since they were generated. Version mode will print the
+                        tool version.
 
 options:
   -h, --help            show this help message and exit
@@ -269,5 +271,13 @@ The project is managed with [uv](https://docs.astral.sh/uv/). The tests are prop
 $ uv sync
 $ uv run minigun --time-budget 60
 ```
+
+The code is checked with ruff, for bugs only since the project keeps its own formatting, and with pyright:
+```
+$ uv run ruff check .
+$ uv run pyright
+```
+
+CI runs both, and the tests on Linux, macOS and Windows.
 
 See [docs/architecture.md](https://github.com/soren-n/tickle/blob/main/docs/architecture.md) for how tickle schedules and evaluates tasks, and [docs/releasing.md](https://github.com/soren-n/tickle/blob/main/docs/releasing.md) for how to cut a release.
