@@ -1,6 +1,6 @@
 # External module dependencies
 from dataclasses import dataclass, field
-from typing import Any, ParamSpec, Callable, Tuple, List, Dict, Set
+from typing import Callable, List, Dict, Set
 from pathlib import Path
 import hashlib
 import json
@@ -44,8 +44,13 @@ CompiledAgenda = List[CompiledTask]
 def load(agenda_path : Path) -> Agenda:
     assert isinstance(agenda_path, Path)
     with agenda_path.open('r') as agenda_file:
-        raw_data = yaml.safe_load(agenda_file)
-        return dataspec.decode(Agenda, raw_data)
+        try:
+            raw_data = yaml.safe_load(agenda_file)
+            return dataspec.decode(Agenda, raw_data)
+        except (yaml.YAMLError, TypeError) as error:
+            raise RuntimeError(
+                'Invalid agenda file %s:\n%s' % (agenda_path, error)
+            ) from error
 
 def store(agenda_path : Path, agenda_data : Agenda):
     assert isinstance(agenda_data, Agenda)
@@ -59,65 +64,31 @@ def store(agenda_path : Path, agenda_data : Agenda):
             default_flow_style = False
         )
 
-P = ParamSpec('P')
 def compile(target_dir : Path, agenda_data : Agenda) -> CompiledAgenda:
-    def _compile_proc(template : List[str]) -> Callable[P, List[str]]:
-        def _compile(template : List[str]) -> Tuple[List[str], str]:
-            params : List[str] = []
-            parts : List[str] = []
-            for part in template:
-                if len(part) == 0: continue
-                if part.startswith('$'):
-                    params.append(part[1:])
-                    parts.append('%s')
-                else:
-                    parts.append(part)
-            return params, ' '.join(parts)
+    def _compile_proc(template : List[str]) -> Callable[..., List[str]]:
+        # Build the argument vector word by word: a literal word stays one
+        # word, and a $parameter word becomes one word per argument value.
+        # Joining into a string and splitting it again would break literal
+        # words with spaces, values with quotes, and words with % in them.
+        params = [ part[1:] for part in template if part.startswith('$') ]
 
-        params, command = _compile(template)
-
-        def _join(inputs : List[str]) -> str:
-            def _wrap(input : str) -> str:
-                if ' ' not in input: return input
-                return '\"%s\"' % input
-
-            return ' '.join([ _wrap(input) for input in inputs ])
-
-        def _split(input : str) -> List[str]:
-            result : List[str] = []
-            subresult = ''
-            worklist = input.split(' ')
-            while len(worklist) != 0:
-                part = worklist.pop(0)
-                if len(subresult) != 0:
-                    subresult = '%s %s' % (subresult, part)
-                    if part.endswith('\"'):
-                        result.append(subresult[1:-1])
-                        subresult = ''
-                    continue
-                if part.startswith('\"'):
-                    subresult += part
-                    continue
-                result.append(part)
-            return result
-
-        def _apply(**args : Any) -> List[str]:
+        def _apply(**args : List[str]) -> List[str]:
             for param in params:
                 if param in args: continue
-                raise TypeError('Missing required argument \"%s\"' % param)
-            return list(filter(
-                lambda part: part != '',
-                _split(command % tuple(
-                    _join(args[param])
-                    for param in params
-                ))
-            ))
+                raise KeyError(param)
+            result : List[str] = []
+            for part in template:
+                if part.startswith('$'): result.extend(args[part[1:]])
+                else: result.append(part)
+            return result
 
         return _apply
 
-    def _task_hash(task_data : Task) -> str:
+    def _task_hash(task_data : Task, command : List[str]) -> str:
+        # The command is hashed rather than the proc's name, so editing a
+        # proc's definition changes the tasks that use it.
         data = json.dumps({
-            'proc': task_data.proc,
+            'command': command,
             'args': task_data.args,
             'flows': list(sorted(task_data.flows)),
             'inputs': list(sorted(task_data.inputs)),
@@ -151,6 +122,15 @@ def compile(target_dir : Path, agenda_data : Agenda) -> CompiledAgenda:
                     )
                 flow_proc_stage[flow][proc] = index
 
+    def _command(task_data : Task) -> List[str]:
+        try: return procs[task_data.proc](**task_data.args)
+        except KeyError as error:
+            raise RuntimeError(
+                'Missing argument \"%s\" of proc \"%s\" for task \"%s\"' % (
+                    error.args[0], task_data.proc, task_data.desc
+                )
+            ) from error
+
     # Parse tasks
     agenda : CompiledAgenda = []
     for task_data in agenda_data.tasks:
@@ -160,17 +140,18 @@ def compile(target_dir : Path, agenda_data : Agenda) -> CompiledAgenda:
             ))
         for flow in task_data.flows:
             if flow not in flow_proc_stage:
-                raise RuntimeError('Undefined flow \"%s\" for task \"\"' % (
+                raise RuntimeError('Undefined flow \"%s\" for task \"%s\"' % (
                     flow, task_data.desc
                 ))
+        command = _command(task_data)
         agenda.append(CompiledTask(
-            hash = _task_hash(task_data),
+            hash = _task_hash(task_data, command),
             description = task_data.desc,
             flows = {
                 flow : flow_proc_stage[flow][task_data.proc]
                 for flow in task_data.flows
             },
-            command = procs[task_data.proc](**task_data.args),
+            command = command,
             inputs = {
                 Path(target_dir, input)
                 for input in set(task_data.inputs)

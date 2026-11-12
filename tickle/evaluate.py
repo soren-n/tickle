@@ -2,7 +2,6 @@
 from typing import Callable, Optional, List, Dict, Set
 from threading import Event, Thread
 from queue import Queue, Empty
-from time import sleep
 
 # Internal module dependencies
 from .util import SingleWriteMultipleReadLock
@@ -122,6 +121,12 @@ class Worker(Thread):
 Batch = List[Task]
 Program = List[List[Batch]]
 
+# How long an idle worker waits for work before checking whether it was
+# stopped, and how long the idle main loop waits before checking again;
+# reprogramming and stopping wake the main loop at once.
+_POLL_INTERVAL = 0.05
+_IDLE_INTERVAL = 1.0
+
 class Evaluator:
     def __init__(self, worker_count : int):
         self._running : bool = False
@@ -130,21 +135,31 @@ class Evaluator:
         self._queue : Queue[List[Task]] = Queue()
         self._exception : Queue[TaskError] = Queue()
         self._pause = SingleWriteMultipleReadLock()
+        self._wake = Event()
         self._workers = [
             Worker(self._dequeue, index + 1)
-            for index in range(worker_count)
+            for index in range(max(1, worker_count))
         ]
 
     def _dequeue(self, perform : Callable[[List[Task]], None]):
+        # Workers hold the read side of the pause lock while they take and
+        # perform a sequence, so pause() waits for running sequences.
         self._pause.acquire_read()
         try:
-            work = self._queue.get(timeout=1)
-            perform(work)
-            self._queue.task_done()
-        except Empty: sleep(1)
-        except TaskError as e:
-            self._exception.put(e)
-            self._queue.task_done()
+            try: work = self._queue.get(timeout = _POLL_INTERVAL)
+            except Empty: return
+            try: perform(work)
+            except TaskError as error:
+                self._exception.put(error)
+            except Exception as error:
+                # Any other failure must still be reported and accounted
+                # for, or the main loop would wait for the batch forever.
+                self._exception.put(TaskError(
+                    'unknown', '%s: %s' % (type(error).__name__, error)
+                ))
+            finally:
+                self._queue.task_done()
+                self._wake.set()
         finally:
             self._pause.release_read()
 
@@ -159,6 +174,18 @@ class Evaluator:
     def on_task_error(self, error : TaskError) -> None:
         raise error
 
+    def _next_batch(self) -> Optional[List[Batch]]:
+        # Reprogramming happens under the write side of the pause lock, so
+        # taking the batch under the read side never queues a stale one.
+        self._pause.acquire_read()
+        try:
+            if len(self._program) == 0: return None
+            batch = self._program.pop(0)
+            for sequence in batch: self._queue.put(sequence)
+            return batch
+        finally:
+            self._pause.release_read()
+
     def start(self):
         log.debug('Evaluator.start()')
         if self._running:
@@ -169,13 +196,14 @@ class Evaluator:
         for worker in self._workers: worker.start()
         try:
             while self._running:
+                self._wake.clear()
                 if not self._check() and len(self._program) != 0:
                     self.pause()
-                    self.deprogram()
-                    self.resume()
-                if len(self._program) == 0: sleep(1); continue
-                batch = self._program.pop(0)
-                for sequence in batch: self._queue.put(sequence)
+                    try: self.deprogram()
+                    finally: self.resume()
+                if self._next_batch() is None:
+                    self._wake.wait(_IDLE_INTERVAL)
+                    continue
                 self._queue.join()
         finally:
             self._running = False
@@ -184,37 +212,28 @@ class Evaluator:
 
     def pause(self):
         log.debug('Evaluator.pause()')
-        if self._paused:
-            raise RuntimeError('Evaluator can not pause if already paused!')
-        self._pause.acquire_read()
+        self._pause.acquire_write()
         self._paused = True
+
+    def _clear_queue(self):
+        while True:
+            try: self._queue.get(block = False)
+            except Empty: break
+            self._queue.task_done()
 
     def reprogram(self, program : Program):
         log.debug('Evaluator.reprogram()')
         if self._running and not self._paused:
             raise RuntimeError('Evaluator must be paused prior to reprogramming!')
-
-        # Clear existing program
-        while not self._queue.empty():
-            try: self._queue.get()
-            except Empty: break
-            self._queue.task_done()
-
-        # Set the new schedule
+        self._clear_queue()
         self._program = program
+        self._wake.set()
 
     def deprogram(self):
         log.debug('Evaluator.deprogram()')
         if self._running and not self._paused:
             raise RuntimeError('Evaluator must be paused prior to deprogramming!')
-
-        # Clear existing program
-        while not self._queue.empty():
-            try: self._queue.get()
-            except Empty: break
-            self._queue.task_done()
-
-        # Clear schedule
+        self._clear_queue()
         self._program = list()
 
     def resume(self):
@@ -222,10 +241,11 @@ class Evaluator:
         if not self._paused:
             raise RuntimeError('Evaluator can not resume if not paused!')
         self._paused = False
-        self._pause.release_read()
+        self._pause.release_write()
 
     def stop(self):
+        # Safe to call more than once, and from any thread, including a
+        # worker performing the task that ends the evaluation.
         log.debug('Evaluator.stop()')
-        if not self._running:
-            raise RuntimeError('Evaluator can not stop if already not running!')
         self._running = False
+        self._wake.set()

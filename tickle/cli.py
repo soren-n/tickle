@@ -1,15 +1,5 @@
 # External module dependencies
-from typing import (
-    Any,
-    ParamSpec,
-    TypeVar,
-    Generic,
-    Optional,
-    Callable,
-    Tuple,
-    Dict
-)
-from threading import Thread
+from typing import Any
 from pathlib import Path
 import logging
 import signal
@@ -23,36 +13,6 @@ from . import log
 ###############################################################################
 def default_log_path(dir_path : Path = Path('./')) -> Path:
     return Path(dir_path, 'tickle.log')
-
-###############################################################################
-# Async runner
-###############################################################################
-P = ParamSpec('P')
-R = TypeVar('R')
-class Runner(Generic[P, R], Thread):
-    def __init__(self):
-        super().__init__()
-        self._func : Optional[Callable[P, R]] = None
-        self._args : Optional[Tuple[Any, ...]] = None
-        self._kargs : Optional[Dict[str, Any]] = None
-        self._result : Optional[R] = None
-
-    def run(self):
-        if self._func == None: return
-        self._result = self._func(
-            *(self._args if self._args != None else []),
-            **(self._kargs if self._kargs != None else {})
-        )
-
-    def start(self, func : Callable[P, R], *args : Any, **kargs : Any):
-        self._func = func
-        self._args = args
-        self._kargs = kargs
-        super().start()
-
-    def join(self):
-        super().join()
-        return self._result
 
 ###############################################################################
 # Main entry
@@ -97,10 +57,7 @@ def main():
                 Path(cwd, args.cache),
                 args.workers
             )
-            if evaluator == None:
-                raise RuntimeError(
-                    'Failed to initialize online evaluator!'
-                )
+            if evaluator is None: return False
 
             # Setup user termination
             def _terminate(*args : Any):

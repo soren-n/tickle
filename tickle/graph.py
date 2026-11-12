@@ -7,21 +7,29 @@ from .evaluate import Task, Program, Batch
 ###############################################################################
 # Functions
 ###############################################################################
-def has_cycle(worklist : List[Task]):
+def has_cycle(nodes : List[Task]) -> bool:
+    # Depth-first search from every node; a dependency found on the current
+    # path closes a cycle. Searching only from nodes without dependencies
+    # would miss cycles that no such node leads into.
     checked : Set[Task] = set()
-    for root_node in worklist:
+    for root_node in nodes:
+        if root_node in checked: continue
         path : List[Task] = [root_node]
+        on_path : Set[Task] = {root_node}
         stack : List[List[Task]] = [list(root_node.get_deps())]
         while len(stack) != 0:
             node_deps = stack[-1]
             if len(node_deps) == 0:
-                checked.add(path.pop(-1))
+                node = path.pop(-1)
+                on_path.remove(node)
+                checked.add(node)
                 stack.pop(-1)
                 continue
             node_dep = node_deps.pop(0)
             if node_dep in checked: continue
-            if node_dep in path: return True
+            if node_dep in on_path: return True
             path.append(node_dep)
+            on_path.add(node_dep)
             stack.append(list(node_dep.get_deps()))
     return False
 
@@ -46,9 +54,9 @@ def propagate(graph : Graph):
         return result
 
     # Defensively check for cycles
-    worklist = get_leafs(graph)
-    if has_cycle(worklist[:]):
+    if has_cycle(graph):
         raise RuntimeError('Cycle detected in agenda!')
+    worklist = get_leafs(graph)
 
     # Propagate invalidity
     for dst in __topological_order(worklist):
@@ -299,7 +307,7 @@ def compile(graph : Graph) -> Program:
         return _combine_batches(batches_by_flow)
 
     targets = get_roots(graph)
-    if has_cycle(targets[:]):
+    if has_cycle(graph):
         raise RuntimeError('Cycle detected in agenda!')
     alive = _reachable_alive(targets[:])
     roots = _find_leafs(targets[:], alive)

@@ -20,9 +20,14 @@ def empty() -> Depend:
 
 def load(depend_path : Path) -> Depend:
     with depend_path.open('r') as depend_file:
-        raw_data = yaml.safe_load(depend_file)
-        if raw_data is None: return {}
-        return dataspec.decode(Depend, raw_data)
+        try:
+            raw_data = yaml.safe_load(depend_file)
+            if raw_data is None: return {}
+            return dataspec.decode(Depend, raw_data)
+        except (yaml.YAMLError, TypeError) as error:
+            raise RuntimeError(
+                'Invalid depend file %s:\n%s' % (depend_path, error)
+            ) from error
 
 def store(depend_path : Path, depend_data : Depend):
     with depend_path.open('w+') as depend_file:
