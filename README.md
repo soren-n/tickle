@@ -80,6 +80,11 @@ The CLI has two additional modes to offline/online:
 - The __version mode__ will print the installed version of tickle.
 
 The clean mode will only delete generated folders if they are empty after generated files are deleted; i.e. if there are leftover files in the folders, e.g. generated from other processes not within the control of tickle; these files and the host folders are then left untouched.
+Clean also keeps a generated file that the current agenda or depend file now reads as a source, a file that changed after tickle last wrote it, and anything outside the current directory.
+
+The exit code is 0 on success and 1 on failure: a task failed, the agenda or depend file is invalid, or offline mode skipped tasks that could not run. Interrupting offline mode with Ctrl-C exits with 130; the tasks that did not finish run again next time.
+
+While evaluating, tickle prints each task as it starts. A task that succeeds but writes to stderr, such as a compiler warning, has that output printed as a warning, as does a task that succeeds without writing all of its outputs. A failing task's stderr, or its stdout if stderr is empty, is printed with the failure.
 
 If you stick to the default paths and file names, then running tickle should be as simple as:
 ```
@@ -161,9 +166,9 @@ def my_workflow(target_dir: Path) -> None:
     runner.join()
 ```
 
-To remove the generated files again, call `tickle_api.clean(target_dir, cache_path)`.
+To remove the generated files again, call `tickle_api.clean(target_dir, cache_path, agenda_path, depend_path)`; the agenda and depend paths are optional, and let clean keep generated files they now read as sources.
 
-See [docs/api.md](docs/api.md) for the full API reference.
+See [docs/api.md](https://github.com/soren-n/tickle/blob/main/docs/api.md) for the full API reference.
 
 ## The agenda file
 The agenda file is a YAML file with the follow grammar:
@@ -221,12 +226,14 @@ The input and output files that the task ranges over are set with the inputs and
 
 A task is rerun when:
 
-- it changed, i.e. its proc's command, its args, flows, inputs or outputs differ from the last successful run;
-- the content of an input changed, or of a file an input depends on, through other tasks or the depend file;
+- it changed, i.e. its proc's command, its args, flows, inputs or outputs differ from when it last succeeded;
+- the content of an input, or of a file an input depends on through the depend file, differs from when the task last succeeded;
 - one of its outputs is missing;
 - a task it depends on is rerun.
 
-A task with an input that does not exist and that no task produces is skipped, together with the tasks that depend on it; the rest of the agenda is still evaluated.
+A task records its inputs only when it succeeds, so a task that failed or was interrupted runs again on the next run, even if nothing changed in between.
+
+A task with an input that does not exist and that no task produces is skipped, together with the tasks that depend on it. The rest of the agenda is still evaluated, and offline mode then fails. Inputs must be files; a task with a folder as an input is skipped the same way.
 
 You should think of the agenda file as describing the explicit dependencies between files for a task, e.g. source file to object file in a code project build workflow.
 
@@ -243,6 +250,7 @@ The depend file is a YAML file with the following grammar:
 ```
 The file defines a dictionary of file path to list of file paths, i.e. a file path dependency graph; paths are relative to the depend file's folder.
 The dependencies must not form a cycle, neither among themselves nor together with the tasks of the agenda.
+When a task's input depends, directly or not, on a file that another task produces, the task runs after that task, as if the file were one of its inputs; the stage rules of flows apply to such dependencies too.
 
 You should think of the depend file as describing the implicit dependencies between files for a task, i.e. uncovered by scanning the content of the files; e.g. source file to header file in a code project build workflow; the source file to header file dependencies change more often during development than the task dependencies mentioned earlier, and as such should be defined in the depend file and not the agenda file.
 
@@ -262,4 +270,4 @@ $ uv sync
 $ uv run minigun --time-budget 60
 ```
 
-See [docs/architecture.md](docs/architecture.md) for how tickle schedules and evaluates tasks, and [docs/releasing.md](docs/releasing.md) for how to cut a release.
+See [docs/architecture.md](https://github.com/soren-n/tickle/blob/main/docs/architecture.md) for how tickle schedules and evaluates tasks, and [docs/releasing.md](https://github.com/soren-n/tickle/blob/main/docs/releasing.md) for how to cut a release.

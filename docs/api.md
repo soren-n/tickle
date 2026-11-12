@@ -21,7 +21,9 @@ default_worker_count() -> int                              # logical cores minus
 offline(target_dir, agenda_path, depend_path, cache_path, worker_count=default_worker_count()) -> bool
 ```
 
-Evaluates every out-of-date task once and returns when they are done. Returns `True` on success, and `False` if the agenda file is missing, the agenda or depend file is invalid (malformed YAML, an undefined proc or flow, two tasks writing the same output, or a dependency cycle), or a task fails or its command cannot be started. The depend file is optional.
+Evaluates every out-of-date task once and returns when they are done. Returns `True` on success, and `False` if the agenda file is missing, the agenda or depend file is invalid (malformed YAML, an undefined proc or flow, two tasks writing the same output, or a dependency cycle), a task fails or its command cannot be started, or tasks were skipped because an input does not exist and no task produces it. Skipped tasks do not stop the others; the result is `False` once everything else is done. The depend file is optional.
+
+A `KeyboardInterrupt` raised while evaluating propagates to the caller; tasks that did not finish are not recorded as done and run again next time.
 
 ### `online`
 
@@ -45,10 +47,10 @@ A failing task is logged and does not stop the evaluator. A change that makes th
 ### `clean`
 
 ```python
-clean(target_dir, cache_path) -> bool
+clean(target_dir, cache_path, agenda_path=None, depend_path=None) -> bool
 ```
 
-Deletes the files a previous run generated, then the directories it created if they are empty, then the cache. Returns `True`, also when there is no cache.
+Deletes the files a previous run generated, then the directories it created if they are empty, then the cache. It keeps a generated file that the agenda or depend file now reads as a source (when their paths are given), a file that changed after tickle last wrote it, a folder, and anything outside `target_dir`. Returns `True`, also when there is no cache, and `False` without deleting anything if the agenda or depend file is invalid.
 
 ## `tickle.agenda`
 
@@ -73,9 +75,9 @@ store(agenda_path: Path, agenda_data: Agenda) -> None
 compile(target_dir: Path, agenda_data: Agenda) -> list[CompiledTask]
 ```
 
-`load` raises `RuntimeError` for malformed YAML or data that does not fit the types above (`tickle.depend.load` likewise).
+`load` raises `RuntimeError` for a file that cannot be read, malformed YAML, or data that does not fit the types above; the message says where, as in `tasks[2].inputs: ...` (`tickle.depend.load` likewise).
 
-`compile` validates an agenda without running it; it raises `RuntimeError` for an undefined proc or flow, or a proc used in two stages of one flow. Problems between tasks, such as two tasks writing the same output or a dependency on a later stage, are found when an evaluator builds the task graph.
+`compile` validates an agenda without running it; it raises `RuntimeError` for an undefined proc or flow, a proc used in two stages of one flow, or a task whose proc is in no stage of one of its flows. Problems between tasks, such as two tasks writing the same output or a dependency on a later stage, are found when an evaluator builds the task graph.
 
 ## `tickle.depend`
 
@@ -93,4 +95,4 @@ A generator that discovers implicit dependencies, such as a compiler's header de
 
 ## Logging
 
-Tickle prints progress as `[tickle] ...` lines on stdout and also logs through the `logging` root logger; configure a handler (the CLI uses `logging.basicConfig` with a file) to keep the log.
+Tickle prints progress as `[tickle] ...` lines on stdout and also logs through the `logging` root logger; configure a handler (the CLI uses `logging.basicConfig` with a file) to keep the log. Warnings, such as a succeeding task's stderr, are logged at `WARNING`.
