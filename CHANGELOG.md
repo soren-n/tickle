@@ -57,8 +57,6 @@ The cache moves to format 3; a cache written by 0.5.0 is migrated, so upgrading 
 
 ## 0.5.0
 
-## 0.5.0
-
 ### Upgrading
 
 The first run after upgrading reruns every task once: the cache has a new format and tasks are identified differently. `tickle clean` still reads the old cache.

@@ -7,7 +7,7 @@ Tickle is published to PyPI as `tickle-soren-n`. Releases are tagged `vX.Y.Z` on
    uv run ruff check . && uv run pyright
    uv run minigun --time-budget 60
    ```
-   The tests take about ten minutes.
+   The tests take about four minutes.
    Also run the example project in a copy outside the repo (`tickle offline`, edit a source, `tickle offline`, `tickle clean`).
 
 2. **Prepare the release.** Bump the version in `tickle/__init__.py` (`__version__`); it is the only place the version is recorded. Rename the "Unreleased" section of `CHANGELOG.md` to the new version, keeping any "Upgrading" notes at its top, and add an empty "Unreleased" section above it. Commit both as "Prepare vX.Y.Z" and push `main`.
