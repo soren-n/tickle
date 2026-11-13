@@ -210,6 +210,9 @@ def _make_dirs(target_dir : Path, cache : Cache, file_path : Path):
         cache['folders'].update(_rel(target_dir, path) for path in created)
         cache.changed()
 
+# How many of the last lines of a succeeding task's stderr are printed
+_STDERR_TAIL = 5
+
 def _eval_cmd(
     target_dir : Path,
     cache : Cache,
@@ -261,10 +264,13 @@ def _eval_cmd(
         raise TaskError(task_data.description, message)
 
     # Report what the task said and did not do
+    # Tools such as ffmpeg log every run on stderr, so only its end is
+    # printed; the log file keeps all of it
     if result.stderr.strip():
-        log.warning('"%s" wrote to stderr:\n%s' % (
-            task_data.description, result.stderr.rstrip()
-        ))
+        log.warning(
+            '"%s" wrote to stderr' % task_data.description,
+            result.stderr, tail = _STDERR_TAIL
+        )
     for output_path in sorted(task_data.outputs):
         if output_path.exists(): continue
         log.warning('"%s" succeeded without writing %s' % (
@@ -321,6 +327,13 @@ def _make_graph(
                 raise RuntimeError('%s:\n\t\"%s\" -> \"%s\"' % (
                     str(e), dst_data.description, src_data.description
                 )) from e
+
+    # Reject a cycle through the stage order of flows now, over every task;
+    # compiling a program only sees the tasks about to run, so an agenda
+    # would otherwise be accepted or not depending on what is up to date
+    if graph.has_cycle(tasks):
+        raise RuntimeError('Cycle detected in agenda!')
+    graph.check_stages(tasks)
 
     # Done
     return tasks, task_closures
@@ -445,6 +458,11 @@ def _make_schedule(
     # Compile schedule
     return graph.compile(tasks), skipped
 
+def _report_failure(error : TaskError):
+    log.error('Task \"%s\" failed with message:\n%s' % (
+        error.description, error.message.rstrip()
+    ))
+
 ###############################################################################
 # Offline evaluation mode
 ###############################################################################
@@ -523,6 +541,9 @@ class OfflineEvaluator(Evaluator):
     def on_idle(self):
         self._cache.flush()
 
+    def on_task_failed(self, error : TaskError):
+        _report_failure(error)
+
     def start(self):
         log.info('Beginning of evaluation in offline mode')
         self._watcher.start()
@@ -572,9 +593,8 @@ def offline(
         )
         evaluator.start()
     except TaskError as error:
-        log.critical('Task \"%s\" failed with message:\n%s' % (
-            error.description, error.message
-        ))
+        # Its message was reported when it failed
+        log.critical('Task \"%s\" failed' % error.description)
         return False
     except RuntimeError as e:
         log.critical(str(e))
@@ -762,10 +782,12 @@ class OnlineEvaluator(Evaluator):
     def stop(self):
         super().stop()
 
+    def on_task_failed(self, error : TaskError):
+        _report_failure(error)
+
     def on_task_error(self, error : TaskError):
-        log.error('Task \"%s\" failed with message:\n%s' % (
-            error.description, error.message
-        ))
+        # Reported when it failed; the rest of its program is dropped
+        pass
 
 def online(
     target_dir : Path,

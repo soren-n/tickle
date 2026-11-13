@@ -149,6 +149,10 @@ class Evaluator:
         self._exception : Queue[Tuple[int, TaskError]] = Queue()
         self._pause = SingleWriteMultipleReadLock()
         self._wake = Event()
+        # Set by stop(), from any thread and possibly before start(); once
+        # set, workers start nothing more, so stopping waits only for the
+        # tasks already running, not for the rest of their batch
+        self._stopping = Event()
         self._workers = [
             Worker(self._dequeue, index + 1)
             for index in range(max(1, worker_count))
@@ -161,15 +165,17 @@ class Evaluator:
         try:
             try: generation, work = self._queue.get(timeout = _POLL_INTERVAL)
             except Empty: return
-            try: perform(work)
-            except TaskError as error:
-                self._exception.put((generation, error))
+            try:
+                if not self._stopping.is_set(): perform(work)
             except Exception as error:
                 # Any other failure must still be reported and accounted
                 # for, or the main loop would wait for the batch forever.
-                self._exception.put((generation, TaskError(
-                    'unknown', '%s: %s' % (type(error).__name__, error)
-                )))
+                if not isinstance(error, TaskError):
+                    error = TaskError(
+                        'unknown', '%s: %s' % (type(error).__name__, error)
+                    )
+                self._failed(error)
+                self._exception.put((generation, error))
             finally:
                 self._queue.task_done()
                 self._wake.set()
@@ -187,7 +193,22 @@ class Evaluator:
             failed.add(generation)
             self.on_task_error(error)
 
+    def _failed(self, error : TaskError):
+        # Report a failure at once, from the worker, rather than when the
+        # main loop gets to it after the rest of the batch
+        try: self.on_task_failed(error)
+        except Exception as report_error:
+            log.error('Failed reporting a task error: %s: %s' % (
+                type(report_error).__name__, report_error
+            ))
+
+    def on_task_failed(self, error : TaskError) -> None:
+        """Called on the worker thread as soon as a task fails."""
+        pass
+
     def on_task_error(self, error : TaskError) -> None:
+        """Called by the main loop for each failure; ends the evaluation
+        by default."""
         raise error
 
     def on_idle(self) -> None:
@@ -216,7 +237,7 @@ class Evaluator:
         # Main loop
         for worker in self._workers: worker.start()
         try:
-            while self._running:
+            while not self._stopping.is_set():
                 self._wake.clear()
                 failed = self._check()
                 if self._generation in failed and len(self._program) != 0:
@@ -274,5 +295,5 @@ class Evaluator:
         # Safe to call more than once, and from any thread, including a
         # worker performing the task that ends the evaluation.
         log.debug('Evaluator.stop()')
-        self._running = False
+        self._stopping.set()
         self._wake.set()

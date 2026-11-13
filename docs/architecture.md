@@ -60,7 +60,7 @@ When a task starts, its worker hashes the input closure as it is at that moment;
 - A **sequence** is a list of tasks run in order by one worker. Each sequence currently holds one task; joining chains of tasks into longer sequences broke the stage order across flows and is left to the planned ready-queue scheduler.
 - Within each flow, one barrier node is placed between consecutive stages, depending on every task of the earlier stage and depended on by every task of the later one. This keeps the graph linear in size, where edges from every task of a stage to every task of the next would be quadratic.
 - A **batch** is a set of sequences that can run in parallel: a task's batch is one more than the highest batch of its dependencies (Kahn's algorithm). A barrier passes its level on without adding one, so a task starts in the earliest batch its dependencies and stages allow; barriers are then left out.
-- Each dependency respects the stages of the flows its two tasks share, but dependencies can still form a cycle with the stage order of other flows. No task of such a cycle can start, so `compile` raises `RuntimeError` naming them rather than leave them out.
+- Each dependency respects the stages of the flows its two tasks share, but dependencies can still form a cycle with the stage order of other flows. No task of such a cycle can start, so the ordering raises `RuntimeError` naming them rather than leave them out. `_make_graph` runs the same check (`graph.check_stages`) over every task when it builds the graph, so whether an agenda is accepted does not depend on which tasks are up to date.
 
 ## Evaluation
 
@@ -68,13 +68,13 @@ When a task starts, its worker hashes the input closure as it is at that moment;
 
 Each program gets a generation number, and errors carry the generation of the program their task belonged to. The main loop reports every queued error through `on_task_error`, and clears the remaining program only if an error came from the current one, so a failure in an old program never cancels the program that replaced it. It checks the generation again after pausing, since a new program may have been installed while it waited for the lock. When the main loop has nothing to queue it calls `on_idle`, which the evaluators use to write the cache.
 
-`pause`/`resume` take the write side of a reader/writer lock. Workers hold the read side while they take and run a sequence, and the main loop while it queues a batch, so pausing waits for running sequences to finish and reprogramming never races with them. `stop` may be called from any thread, more than once; it ends the loop, and the workers are then stopped and joined.
+`pause`/`resume` take the write side of a reader/writer lock. Workers hold the read side while they take and run a sequence, and the main loop while it queues a batch, so pausing waits for running sequences to finish and reprogramming never races with them. `stop` may be called from any thread, more than once, also before `start`; from then on workers take queued sequences off the queue without running them, so stopping waits only for the tasks already running. It ends the loop, and the workers are then stopped and joined.
 
 When there is no program the main loop waits on an event that reprogramming and stopping set, with a one-second timeout as a fallback; idle workers check for work every 50 milliseconds.
 
 ## Offline mode
 
-`OfflineEvaluator` builds the graph once and adds a forced terminating task that depends on every other task and calls `stop`. Its `on_task_error` re-raises, so `offline()` returns `False` on the first failing task; skipped tasks make it return `False` after the rest has run. It watches the depend file and builds the graph and schedule again if it changes during the run; an invalid depend file is reported and the current schedule kept. The watcher is stopped by `start` after the main loop ends, not by `stop`, which runs on the worker performing the terminating task. `start` writes any pending cache changes on the way out, also when interrupted.
+`OfflineEvaluator` builds the graph once and adds a forced terminating task that depends on every other task and calls `stop`. A failure is printed as soon as it happens (`on_task_failed`, called on the worker), but the main loop learns of it only once the batch has drained; its `on_task_error` then re-raises, so `offline()` returns `False` after the tasks of that batch have finished; skipped tasks make it return `False` after the rest has run. It watches the depend file and builds the graph and schedule again if it changes during the run; an invalid depend file is reported and the current schedule kept. The watcher is stopped by `start` after the main loop ends, not by `stop`, which runs on the worker performing the terminating task. `start` writes any pending cache changes on the way out, also when interrupted.
 
 ## Online mode
 
@@ -85,7 +85,7 @@ When there is no program the main loop waits on an event that reprogramming and 
 
 A change is applied only if everything rebuilds: an agenda or depend file that does not load, or that introduces a cycle, is reported and the current schedule kept. A removed depend file counts as an empty one; a removed agenda is reported and ignored. An unexpected error while rescheduling is reported the same way, so the watcher keeps running.
 
-A failing task is logged and the rest of the schedule dropped; the next change schedules again. Online mode runs until `stop` is called (the CLI does so on Ctrl-C).
+A failing task is logged as it fails and the rest of the schedule dropped; the next change schedules again. Online mode runs until `stop` is called (the CLI does so on Ctrl-C).
 
 ## Watching files
 

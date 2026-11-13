@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Upgrading
+
+The first run after upgrading reruns every task once: the cache has a new format and tasks are identified differently. `tickle clean` still reads the old cache.
+
 ### Changed
 
 - Requires Python 3.11 or later, PyYAML 6.0.3 or later and watchdog 7.1.0 or later.
@@ -13,16 +17,17 @@
 - Offline mode fails (exit code 1, `offline()` returns `False`) when tasks are skipped because an input does not exist and no task produces it. The other tasks still run first.
 - A depend file entry naming a file that another task produces now makes the task depend on that task, so it runs after it; before, the two could run in parallel.
 - `tickle clean` keeps generated files that the agenda or depend file now reads as sources, files changed after tickle wrote them, folders, and anything outside the project. `api.clean` takes optional `agenda_path` and `depend_path` arguments for this; the CLI passes them.
-- A succeeding task's stderr, such as compiler warnings, is printed as a warning instead of being discarded, and a task that succeeds without writing all of its outputs is reported. A failing task with an empty stderr shows its stdout.
+- A succeeding task's stderr, such as compiler warnings, is reported instead of being discarded: the warning shows its last five lines and the log file all of it. A task that succeeds without writing all of its outputs is reported. A failing task with an empty stderr shows its stdout.
+- A failing task is reported as soon as it fails, not after the other tasks running alongside it have finished.
 - The CLI exits with 1 on failure instead of 255, and with 130 when interrupted.
 - Agenda and depend errors say where the problem is, such as `tasks[2].inputs: ...`.
 - Agendas are parsed with PyYAML's C loader when it is available, which is several times faster for large agendas.
-- Paths in the agenda and depend file are normalised: `out/x.txt`, `./out/x.txt` and `out/../out/x.txt` name the same file, so a task reading one spelling depends on the task writing another, and two tasks writing one file under different spellings are rejected.
+- Paths in the agenda and depend file are normalised: `out/x.txt`, `./out/x.txt`, `out/../out/x.txt` and the absolute path name the same file, so a task reading one spelling depends on the task writing another, and two tasks writing one file under different spellings are rejected.
 - A flow named by the empty string is rejected.
 - Tasks run with no stdin, so a task that reads its input from stdin gets an empty one instead of waiting on the terminal.
 - Tickle logs to the `tickle` logger instead of the root logger, so it no longer configures logging for a script that calls the API. Progress lines are flushed as they are printed, so they show up as they happen when the output goes to a pipe or a file.
-- Within a stage, a task now waits only for the tasks it depends on, not for every task scheduled before it, and every task starts in the earliest step its dependencies and stages allow.
-- An agenda whose dependencies, including those from the depend file, form a cycle together with the stage order of flows is rejected, naming the tasks involved; for example, with two flows of two stages each, a task in the first stage of one flow reading the output of a task in the second stage of the other, and the other way around.
+- Every task is placed in the earliest batch its dependencies and stages allow. Tasks still run in batches, so a task waits for every task of the batches before it; the scheduler planned for 0.6.0 removes that wait.
+- An agenda whose dependencies, including those from the depend file, form a cycle together with the stage order of flows is rejected, naming the tasks involved, also when every task is up to date; for example, with two flows of two stages each, a task in the first stage of one flow reading the output of a task in the second stage of the other, and the other way around.
 - The CLI rejects agenda, depend, cache and log paths outside the current directory, and cache and log paths in folders that do not exist, with exit code 2, instead of failing with a traceback.
 
 ### Fixed
@@ -37,6 +42,10 @@
 - Online mode could start a task before the earlier stages of its flow had finished, when it followed a task of another flow.
 - In online mode, a failure reported after the agenda or an input changed could cancel the new schedule.
 - Ctrl-C in offline mode printed a traceback.
+- Stopping online mode with Ctrl-C or SIGTERM kept starting the remaining tasks of the current batch; it now waits only for the running tasks.
+- Checking a large agenda for cycles took time quadratic in its number of tasks in offline mode: 200000 tasks spent about 33 seconds in the graph checks, now about 5.
+- Loading a large agenda took twice as long as needed.
+- A cache or log path naming a folder failed with a traceback; the CLI now reports it.
 - A task whose proc is in no stage of one of its flows, a folder used as an input, or an unreadable agenda or depend file crashed with a traceback; they are now reported.
 - A succeeding task that printed bytes that are not valid text was reported as failed, under the name "unknown".
 - Online mode never noticed inputs in folders that did not exist when it started, and on Linux missed atomic saves that are reported only as moves. A failing change handler no longer stops all watching.

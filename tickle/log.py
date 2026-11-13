@@ -16,9 +16,22 @@ def info(msg : str):
     _logger.info(msg)
     _print(msg)
 
-def warning(msg : str):
-    _logger.warning(msg)
-    _print('Warning: %s' % msg)
+def warning(msg : str, detail : str = '', tail : int = 0):
+    """Log msg with the whole of detail, and print msg with only the last
+    tail lines of detail, or all of it when tail is 0."""
+    detail = detail.rstrip()
+    if len(detail) == 0:
+        _logger.warning(msg)
+        _print('Warning: %s' % msg)
+        return
+    _logger.warning('%s:\n%s' % (msg, detail))
+    lines = detail.splitlines()
+    if tail == 0 or len(lines) <= tail:
+        _print('Warning: %s:\n%s' % (msg, detail))
+        return
+    _print('Warning: %s; last %d of %d lines (all in the log):\n%s' % (
+        msg, tail, len(lines), '\n'.join(lines[-tail:])
+    ))
 
 def error(msg : str):
     _logger.error(msg)

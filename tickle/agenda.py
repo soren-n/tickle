@@ -98,6 +98,13 @@ def compile(target_dir : Path, agenda_data : Agenda) -> CompiledAgenda:
 
         return _apply
 
+    def _hash_path(path : str) -> str:
+        # Relative to the agenda's folder, with / separators, so a path
+        # written absolute or relative, and on any system, hashes the same
+        absolute = resolve_path(target_dir, path)
+        try: return Path(os.path.relpath(absolute, target_dir)).as_posix()
+        except ValueError: return absolute.as_posix() # another drive
+
     def _task_hash(task_data : Task, command : List[str]) -> str:
         # The command is hashed rather than the proc's name, so editing a
         # proc's definition changes the tasks that use it. Flows only order
@@ -106,8 +113,8 @@ def compile(target_dir : Path, agenda_data : Agenda) -> CompiledAgenda:
         data = json.dumps({
             'command': command,
             'args': task_data.args,
-            'inputs': sorted({ os.path.normpath(path) for path in task_data.inputs }),
-            'outputs': sorted({ os.path.normpath(path) for path in task_data.outputs })
+            'inputs': sorted({ _hash_path(path) for path in task_data.inputs }),
+            'outputs': sorted({ _hash_path(path) for path in task_data.outputs })
         }, sort_keys = True)
         return hashlib.md5(data.encode('utf-8')).hexdigest()
 

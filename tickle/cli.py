@@ -44,6 +44,8 @@ def main():
                 parser.error('the folder of the %s file %s does not exist' % (
                     name, value
                 ))
+            if name in ['cache', 'log'] and file_path.is_dir():
+                parser.error('the %s file %s is a folder' % (name, value))
 
         # Handle logging
         logging.basicConfig(
@@ -83,7 +85,7 @@ def main():
 
             # Setup user termination
             def _terminate(*args : Any):
-                log.info('Ctrl-C registered; terminating ...')
+                log.info('Stopping; waiting for running tasks ...')
                 evaluator.stop()
 
             signal.signal(signal.SIGINT, _terminate)
@@ -134,27 +136,27 @@ def main():
         type = str,
         dest = 'agenda',
         default = api.default_agenda_path(),
-        help = 'Agenda YAML file location; contains the procedure and task definitions, file path must be relative to current working directory'
+        help = 'Agenda YAML file location; contains the procedure and task definitions, must be inside the current working directory'
     )
     parser.add_argument(
         '-d', '--depend',
         type = str,
         dest = 'depend',
         default = api.default_depend_path(),
-        help = 'Depend YAML file location; contains a map of dynamic task dependencies, this file is optional, file path must be relative to current working directory'
+        help = 'Depend YAML file location; contains a map of dynamic task dependencies, this file is optional, must be inside the current working directory'
     )
     parser.add_argument(
         '-c', '--cache',
         type = str,
         dest = 'cache',
         default = api.default_cache_path(),
-        help = 'Binary cache file location; contains inter-run persistent data, file path must be relative to current working directory'
+        help = 'Binary cache file location; contains inter-run persistent data, must be inside the current working directory'
     )
     parser.add_argument(
         '-l', '--log',
         type = str,
         dest = 'log',
         default = default_log_path(),
-        help = 'Log file location; contains runtime messages, file path must be relative to current working directory'
+        help = 'Log file location; contains runtime messages, must be inside the current working directory'
     )
     sys.exit(_app(parser.parse_args()))

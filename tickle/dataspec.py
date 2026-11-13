@@ -1,6 +1,6 @@
 # External module dependencies
 from dataclasses import is_dataclass
-from typing import cast, get_origin, get_args, Any, Callable, Union, List, Dict
+from typing import cast, get_origin, get_args, Any, Callable, Union, List, Dict, Tuple
 from inspect import signature
 
 ###############################################################################
@@ -18,6 +18,18 @@ Dataspec = Union[
 ###############################################################################
 # Functions
 ###############################################################################
+# The fields of each dataclass, as (name, type); looking up the signature
+# for every value took half the time of decoding a large agenda
+_FIELDS : Dict[type, List[Tuple[str, Any]]] = {}
+
+def _fields(T : type) -> List[Tuple[str, Any]]:
+    if T not in _FIELDS:
+        _FIELDS[T] = [
+            (name, parameter.annotation)
+            for name, parameter in signature(T).parameters.items()
+        ]
+    return _FIELDS[T]
+
 class DecodeError(TypeError):
     """A value that does not fit its type, with where it was found."""
     def __init__(self, message : str, where : List[str]):
@@ -57,11 +69,11 @@ def decode(T : type, value : Any) -> Any:
                 type(value).__name__, str(value)
             ))
         result = {}
-        for l, t in signature(T).parameters.items():
+        for l, t in _fields(T):
             if l not in value:
                 raise TypeError('Expected dict to define field %s' % l)
             result[l] = _at('.%s' % l, (
-                lambda t = t, l = l: _value(t.annotation, value[l])
+                lambda t = t, l = l: _value(t, value[l])
             ))
         return T(**result)
 
@@ -135,10 +147,10 @@ def encode(T : type, value : Any) -> Dataspec:
     def _document(T : type, value : Any) -> Any:
         if not is_dataclass(T): return _composite(T, value)
         result : Dict[str, Any] = {}
-        for l, t in signature(T).parameters.items():
+        for l, t in _fields(T):
             if l not in value.__dict__:
                 raise TypeError('Expected dataclass to define field %s' % l)
-            result[l] = _value(t.annotation, value.__dict__[l])
+            result[l] = _value(t, value.__dict__[l])
         return result
 
     def _simple(T : type, value : Any) -> Any:

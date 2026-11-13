@@ -90,9 +90,9 @@ The CLI has two additional modes to offline/online:
 The clean mode will only delete generated folders if they are empty after generated files are deleted; i.e. if there are leftover files in the folders, e.g. generated from other processes not within the control of tickle; these files and the host folders are then left untouched.
 Clean also keeps a generated file that the current agenda or depend file now reads as a source, a file that changed after tickle last wrote it, and anything outside the current directory.
 
-The exit code is 0 on success and 1 on failure: a task failed, the agenda or depend file is invalid, or offline mode skipped tasks that could not run. An invalid command line, such as a cache file outside the current directory or in a folder that does not exist, exits with 2. Interrupting offline mode with Ctrl-C exits with 130; the tasks that did not finish run again next time.
+The exit code is 0 on success and 1 on failure: a task failed, the agenda or depend file is invalid, or offline mode skipped tasks that could not run. An invalid command line, such as a cache file outside the current directory or in a folder that does not exist, exits with 2. Interrupting offline mode with Ctrl-C exits with 130; the tasks that did not finish run again next time. Online mode stops on Ctrl-C or SIGTERM once the running tasks finish, and starts no new ones. Offline mode does not yet handle SIGTERM: tickle ends at once and the tasks it started keep running, so stop it with Ctrl-C (SIGINT to its process group) where you can.
 
-While evaluating, tickle prints each task as it starts; the lines are flushed at once, so they also appear as they happen when the output goes to a pipe or a file. A task that succeeds but writes to stderr, such as a compiler warning, has that output printed as a warning, as does a task that succeeds without writing all of its outputs. A failing task's stderr, or its stdout if stderr is empty, is printed with the failure.
+While evaluating, tickle prints each task as it starts; the lines are flushed at once, so they also appear as they happen when the output goes to a pipe or a file. A task that succeeds but writes to stderr, such as a compiler warning, gets a warning with the last five lines of that output; the log file has all of it. A task that succeeds without writing all of its outputs is reported too. A failing task's stderr, or its stdout if stderr is empty, is printed as soon as it fails, while the other running tasks carry on.
 
 If you stick to the default paths and file names, then running tickle should be as simple as:
 ```
@@ -235,7 +235,7 @@ The input and output files that the task ranges over are set with the inputs and
 
 A task is rerun when:
 
-- it changed, i.e. its proc's command, its args, flows, inputs or outputs differ from when it last succeeded;
+- it changed, i.e. its proc's command, its args, inputs or outputs differ from when it last succeeded (its flows do not count);
 - the content of an input, or of a file an input depends on through the depend file, differs from when the task last succeeded;
 - one of its outputs is missing;
 - a task it depends on is rerun.
@@ -246,7 +246,7 @@ A task with an input that does not exist and that no task produces is skipped, t
 
 A task must have at least one output; a task without outputs is skipped the same way. For a task that only has an effect elsewhere, such as uploading a file, let its command also write a small stamp file and list that as its output.
 
-Paths may be written in any equivalent way: `out/x.txt`, `./out/x.txt` and `out/../out/x.txt` name the same file, and changing how a path is written does not make a task rerun.
+Paths may be written in any equivalent way: `out/x.txt`, `./out/x.txt`, `out/../out/x.txt` and the absolute path name the same file, and changing how a path is written does not make a task rerun. Tickle compares paths as written, without resolving symbolic links or ignoring case, so on a file system that ignores case `out/x.txt` and `OUT/X.txt` are one file to the system but two to tickle; spell each path one way.
 
 You should think of the agenda file as describing the explicit dependencies between files for a task, e.g. source file to object file in a code project build workflow.
 

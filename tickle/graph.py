@@ -26,7 +26,9 @@ def has_cycle(nodes : List[Task]) -> bool:
                 checked.add(node)
                 stack.pop(-1)
                 continue
-            node_dep = node_deps.pop(0)
+            # From the end: the offline terminating task depends on every
+            # task, and popping from the front made its search quadratic
+            node_dep = node_deps.pop()
             if node_dep in checked: continue
             if node_dep in on_path: return True
             path.append(node_dep)
@@ -90,18 +92,11 @@ def _levels(
             if waiting[ref] == 0: ready.append(ref)
     return [ result[index] for index in sorted(result) ]
 
-def compile(graph : Graph) -> Program:
-    if has_cycle(graph):
-        raise RuntimeError('Cycle detected in agenda!')
-
-    # Every out-of-date task that can run. Propagation has already made the
-    # tasks after an out-of-date task out of date, so no search is needed;
-    # searching down from the tasks nothing depends on stopped at skipped
-    # tasks and missed the tasks only they needed.
-    tasks : List[Task] = [
-        task for task in graph
-        if not task.get_valid() and task.get_active()
-    ]
+def _order(tasks : List[Task]) -> List[List[int]]:
+    """The positions of the tasks grouped into levels: each task after its
+    dependencies among the tasks and after the tasks of the earlier stages
+    of its flows. Raises RuntimeError if the dependencies form a cycle with
+    the stage order, since no task of such a cycle can ever start."""
     uids : Dict[Task, int] = { task : uid for uid, task in enumerate(tasks) }
     deps : Dict[int, Set[int]] = dict()
     refs : Dict[int, Set[int]] = dict()
@@ -132,18 +127,12 @@ def compile(graph : Graph) -> Program:
                 for uid in current: deps[uid].add(barrier)
             previous = current
 
-    # Each batch holds the tasks whose dependencies all lie in earlier
-    # batches; one sequence per task, and barriers are left out
-    program : Program = []
+    # Levels without the barriers
     barriers = set(range(len(tasks), next_uid))
     levels = _levels(sorted(deps.keys()), deps, refs, barriers)
-    for level in levels:
-        batch = [ [tasks[uid]] for uid in level if uid < len(tasks) ]
-        if len(batch) != 0: program.append(batch)
 
     # Every dependency may respect the stages of the flows its two tasks
-    # share, and still close a cycle with the stage order of other flows;
-    # no task of such a cycle can ever start
+    # share, and still close a cycle with the stage order of other flows
     placed = { uid for level in levels for uid in level }
     stuck = [ uid for uid in range(len(tasks)) if uid not in placed ]
     if len(stuck) != 0:
@@ -154,4 +143,34 @@ def compile(graph : Graph) -> Program:
                 for uid in stuck if tasks[uid].description
             ))
         )
+    return [
+        [ uid for uid in level if uid < len(tasks) ]
+        for level in levels
+    ]
+
+def check_stages(graph : Graph):
+    """Raise RuntimeError if the dependencies of the tasks form a cycle with
+    the stage order of their flows. compile only sees the tasks it is about
+    to run, so this checks the whole graph, whatever is up to date."""
+    _order(graph)
+
+def compile(graph : Graph) -> Program:
+    if has_cycle(graph):
+        raise RuntimeError('Cycle detected in agenda!')
+
+    # Every out-of-date task that can run. Propagation has already made the
+    # tasks after an out-of-date task out of date, so no search is needed;
+    # searching down from the tasks nothing depends on stopped at skipped
+    # tasks and missed the tasks only they needed.
+    tasks : List[Task] = [
+        task for task in graph
+        if not task.get_valid() and task.get_active()
+    ]
+
+    # Each batch holds the tasks whose dependencies all lie in earlier
+    # batches; one sequence per task
+    program : Program = []
+    for level in _order(tasks):
+        batch = [ [tasks[uid]] for uid in level ]
+        if len(batch) != 0: program.append(batch)
     return program

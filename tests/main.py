@@ -1106,18 +1106,37 @@ def _wide_graph(width: int, stages: int) -> list[tev.Task]:
     return tasks
 
 
-@context(g.int_range(4000, 5000), g.int_range(2, 3))
+def _compile_time(width: int, stages: int) -> tuple[float, bool]:
+    """The best of three times to compile a wide graph with a task that
+    depends on every other, as offline mode adds, and whether the program
+    holds every task."""
+    best = float('inf')
+    complete = True
+    for _ in range(3):
+        tasks = _wide_graph(width, stages)
+        hub = tev.Task({'': 0}, lambda: None, True)
+        hub.add_dependencies(tasks)
+        tasks.append(hub)
+        start = time.monotonic()
+        program = tgraph.compile(tasks)
+        best = min(best, time.monotonic() - start)
+        count = sum(len(sequence) for batch in program for sequence in batch)
+        complete = complete and count == len(tasks)
+    return best, complete
+
+
+@context(g.int_range(8000, 9000), g.int_range(2, 2))
 @prop('Compiling a wide program takes time linear in its size', attempts=3)
 def _program_compile_wide(width: int, stages: int) -> bool:
     # Batches used to be joined by an edge from every task of one batch to
     # every task of the next, so two stages of 4000 tasks took minutes and
-    # gigabytes to compile
-    tasks = _wide_graph(width, stages)
-    start = time.monotonic()
-    program = tgraph.compile(tasks)
-    elapsed = time.monotonic() - start
-    count = sum(len(sequence) for batch in program for sequence in batch)
-    return count == len(tasks) and elapsed < 10.0
+    # gigabytes to compile; and the cycle check was quadratic in the number
+    # of dependencies of one task (a ratio of about 10 here, against 4).
+    # Comparing four times the tasks keeps the bound independent of the
+    # machine.
+    small, small_complete = _compile_time(width, stages)
+    large, large_complete = _compile_time(4 * width, stages)
+    return small_complete and large_complete and large < 7 * max(small, 0.01)
 
 @context(any_agendas)
 @prop('Compiled programs put each task in the earliest batch its dependencies and stages allow', attempts=1000)
@@ -1651,18 +1670,225 @@ def _logging_own_logger(missing: int) -> bool:
     )
 
 
-@context(g.int_range(0, 1))
-@prop('The CLI reports bad cache paths without a traceback', attempts=_attempts(4))
-def _cli_bad_cache_path(absolute: int) -> bool:
+@context(g.int_range(0, 3), g.one_of(['offline', 'clean']))
+@prop('The CLI reports bad cache and log paths without a traceback', attempts=_attempts(8))
+def _cli_bad_cache_path(kind: int, mode: str) -> bool:
     test_path = _fixture_path()
     ta.store(test_path / 'agenda.yaml', ta.Agenda())
-    cache = str(Path('/', 'elsewhere', 'tickle.cache')) if absolute else 'missing/tickle.cache'
+    (test_path / 'folder').mkdir()
+    option, value = [
+        ('-c', str(Path('/', 'elsewhere', 'tickle.cache'))),
+        ('-c', 'missing/tickle.cache'),
+        ('-c', 'folder'),
+        ('-l', 'folder')
+    ][kind]
     result = subprocess.run(
         [sys.executable, '-c', 'from tickle.cli import main; main()',
-         '-c', cache, 'offline'],
+         option, value, mode],
         cwd = test_path, capture_output = True, text = True
     )
     return result.returncode != 0 and 'Traceback' not in result.stderr
+
+###############################################################################
+# Stopping, failures and paths
+###############################################################################
+@context(g.int_range(1, 3), g.int_range(2, 4))
+@prop('Stopping the evaluator starts no more tasks of the running batch', attempts=_attempts(10))
+def _evaluator_stop_starts_nothing(workers: int, factor: int) -> bool:
+    started: list[int] = []
+    lock = Lock()
+
+    def _work(index: int) -> None:
+        with lock: started.append(index)
+        time.sleep(0.3)
+
+    evaluator = tev.Evaluator(workers)
+    tasks = [
+        tev.Task({'flow': 0}, (lambda index = index: _work(index)))
+        for index in range(workers * factor)
+    ]
+    for task in tasks:
+        task.set_valid(False)
+        task.set_active(True)
+    evaluator.pause()
+    evaluator.reprogram(tgraph.compile(tasks))
+    evaluator.resume()
+    runner = Thread(target = evaluator.start, daemon = True)
+    runner.start()
+    try:
+        if not _wait_for(lambda: len(started) != 0, 5.0): return False
+        time.sleep(0.05)
+        evaluator.stop()
+        runner.join(timeout = 10)
+    finally:
+        evaluator.stop()
+    return not runner.is_alive() and len(started) <= workers
+
+
+@prop('Stopping the evaluator before it starts ends it at once', attempts=_attempts(5))
+def _evaluator_stop_before_start() -> bool:
+    evaluator = tev.Evaluator(2)
+    evaluator.stop()
+    runner = Thread(target = evaluator.start, daemon = True)
+    runner.start()
+    runner.join(timeout = 5)
+    return not runner.is_alive()
+
+
+@context(g.int_range(1, 4))
+@prop('A failing task is reported while the rest of its batch still runs', attempts=_attempts(10))
+def _evaluator_reports_failure_at_once(slow_count: int) -> bool:
+    finished: list[int] = []
+    reported_while: list[int] = []
+
+    class _Evaluator(tev.Evaluator):
+        def on_task_failed(self, error: tev.TaskError) -> None:
+            reported_while.append(len(finished))
+
+        def on_task_error(self, error: tev.TaskError) -> None:
+            pass
+
+    def _slow(index: int) -> None:
+        time.sleep(0.5)
+        finished.append(index)
+
+    def _fail() -> None:
+        raise tev.TaskError('Failure', 'failed')
+
+    tasks = [
+        tev.Task({'flow': 0}, (lambda index = index: _slow(index)))
+        for index in range(slow_count)
+    ] + [tev.Task({'flow': 0}, _fail)]
+    for task in tasks:
+        task.set_valid(False)
+        task.set_active(True)
+    evaluator = _Evaluator(slow_count + 1)
+    evaluator.pause()
+    evaluator.reprogram(tgraph.compile(tasks))
+    evaluator.resume()
+    runner = Thread(target = evaluator.start, daemon = True)
+    runner.start()
+    try:
+        if not _wait_for(lambda: len(finished) == slow_count, 5.0): return False
+    finally:
+        evaluator.stop()
+        runner.join(timeout = 10)
+    return reported_while == [0]
+
+
+@context(any_agendas, g.int_range(0, 20))
+@prop('The stage check rejects a cycle with the stage order whatever is up to date', attempts=1000)
+def _graph_check_stages(
+    agenda: ta.Agenda,
+    extra_count: int,
+    rng: random.Random
+) -> bool:
+    compiled, tasks = _task_graph(agenda)
+    assume(len(tasks) >= 2)
+    for _ in range(extra_count):
+        dst, src = rng.sample(tasks, 2)
+        if dst in _upstream(src): continue
+        try: dst.add_dependency(src)
+        except RuntimeError: continue
+    for task in tasks:
+        task.set_valid(rng.choice([True, False]))
+        task.set_active(rng.random() < 0.8)
+    order: dict[int, set[int]] = {index: set() for index in range(len(tasks))}
+    for index, task in enumerate(tasks):
+        order[index].update(tasks.index(dep) for dep in task.get_deps())
+        for other, other_data in enumerate(compiled):
+            for flow, stage in compiled[index].flows.items():
+                if other_data.flows.get(flow, stage) < stage: order[index].add(other)
+    try: tgraph.check_stages(tasks)
+    except RuntimeError: return _has_cycle(order)
+    return not _has_cycle(order)
+
+
+@context(worker_counts)
+@prop('Offline evaluation rejects a cycle with the stage order also when every task is up to date', attempts=_attempts(5))
+def _agenda_evaluate_offline_stage_cycle_cached(workers: int) -> bool:
+    # A reads D's output and C reads B's; with A before B in one flow and C
+    # before D in another, no order satisfies both
+    script = [sys.executable, str(SUCCESS_SCRIPT), '-i', '$inputs', '-o', '$outputs']
+    agenda = ta.Agenda(
+        procs = {name: script for name in ['pa', 'pb', 'pc', 'pd']},
+        flows = {'f1': [['pa', 'pb']], 'f2': [['pc', 'pd']]}
+    )
+    for desc, proc, flow, inputs, output in [
+        ('Task A', 'pa', 'f1', ['temp/d.txt'], 'temp/a.txt'),
+        ('Task B', 'pb', 'f1', [], 'temp/b.txt'),
+        ('Task C', 'pc', 'f2', ['temp/b.txt'], 'temp/c.txt'),
+        ('Task D', 'pd', 'f2', [], 'temp/d.txt')
+    ]:
+        agenda.tasks.append(ta.Task(
+            desc = desc, proc = proc, flows = [flow],
+            args = {'inputs': inputs, 'outputs': [output]},
+            inputs = inputs, outputs = [output]
+        ))
+    test_path = _fixture_path()
+    if not _run_offline(test_path, agenda, workers)[0]: return False
+
+    # Flows do not change what a task is, so nothing is out of date
+    agenda.flows = {'f1': [['pa'], ['pb']], 'f2': [['pc'], ['pd']]}
+    success, performed = _run_offline(test_path, agenda, workers)
+    return not success and len(performed) == 0
+
+
+@context(evaluated_agendas, worker_counts)
+@prop('Offline evaluation after writing paths absolute runs no tasks', attempts=_attempts(30))
+def _agenda_evaluate_offline_absolute_paths(agenda: ta.Agenda, workers: int) -> bool:
+    test_path = _fixture_path()
+    if not _run_offline(test_path, agenda, workers)[0]: return False
+    for task in agenda.tasks:
+        task.inputs = [str(test_path / _norm(path)) for path in task.inputs]
+        task.outputs = [str(test_path / _norm(path)) for path in task.outputs]
+    success, performed = _run_offline(test_path, agenda, workers)
+    return success and len(performed) == 0
+
+
+@context(g.int_range(0, 12))
+@prop('A succeeding task prints only the end of its stderr and logs all of it', attempts=_attempts(5))
+def _agenda_evaluate_offline_stderr_tail(line_count: int) -> bool:
+    agenda = ta.Agenda(
+        procs = {'noisy': [
+            sys.executable, '-c',
+            'import pathlib, sys\n'
+            'for i in range(int(sys.argv[2])): print("line %d" % i, file = sys.stderr)\n'
+            'pathlib.Path(sys.argv[1]).write_text("done")',
+            '$output', '$count'
+        ]},
+        flows = {'flow': [['noisy']]},
+        tasks = [ta.Task(
+            desc = 'Task noisy', proc = 'noisy', flows = ['flow'],
+            args = {'output': ['out.txt'], 'count': [str(line_count)]},
+            inputs = [], outputs = ['out.txt']
+        )]
+    )
+    test_path = _fixture_path()
+    ta.store(test_path / 'agenda.yaml', agenda)
+    records = _Records()
+    logger = logging.getLogger('tickle')
+    logger.addHandler(records)
+    output = io.StringIO()
+    try:
+        with redirect_stdout(output):
+            success = tapi.offline(
+                test_path, test_path / 'agenda.yaml',
+                test_path / 'depend.yaml', test_path / 'tickle.cache', 1
+            )
+    finally:
+        logger.removeHandler(records)
+    printed = [
+        line for line in output.getvalue().splitlines()
+        if line.startswith('line ')
+    ]
+    logged = '\n'.join(record.getMessage() for record in records.records)
+    expected = ['line %d' % i for i in range(line_count)]
+    return (
+        success
+        and printed == expected[-5:]
+        and all(line in logged for line in expected)
+    )
 
 ###############################################################################
 # Specification
@@ -1717,4 +1943,11 @@ spec = conj(
     _agenda_evaluate_online_skipped,
     _agenda_clean_old_cache,
     _cli_interrupt,
+    _evaluator_stop_starts_nothing,
+    _evaluator_stop_before_start,
+    _evaluator_reports_failure_at_once,
+    _graph_check_stages,
+    _agenda_evaluate_offline_stage_cycle_cached,
+    _agenda_evaluate_offline_absolute_paths,
+    _agenda_evaluate_offline_stderr_tail,
 )
