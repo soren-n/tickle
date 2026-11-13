@@ -42,7 +42,7 @@ class Result:
     skipped: list[str]     # could not run: an input is missing and no task makes it, or no outputs
     blocked: list[str]     # did not run because a task failed
     planned: list[str]     # a dry run's tasks
-    reasons: dict[str, str]  # a dry run's reason for each planned task, such as 'its output out/x is missing'
+    reasons: dict[str, str]  # a dry run's reason for each planned task, such as 'its output out/x is missing'; paths are relative to the target directory, with / on every platform
     error: str | None      # why the run could not start: no agenda, an invalid agenda or depend file, the lock is held, ...
     seconds: float         # how long the run took
 ```
