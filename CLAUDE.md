@@ -37,7 +37,7 @@ To try the CLI end to end, copy `examples/hello_world` somewhere outside the rep
 
 ## Conventions
 
-- Match the existing style: `name : Type` annotations with spaces around the colon, `typing` generics (`List`, `Dict`, `Set`), `%` string formatting, and `####` banner comments separating sections. No formatter is configured; do not reformat unrelated code. `ruff check` (bug rules only) and pyright in basic mode must pass; CI runs them.
+- Match the existing style: `name : Type` annotations with spaces around the colon, builtin generics (`list`, `dict`, `set`) and `X | None`, `%` string formatting, and `####` banner comments separating sections. No formatter is configured; do not reformat unrelated code. `ruff check` (bug rules only) and pyright in basic mode must pass; CI runs them.
 - Runtime dependencies are only `pyyaml` and `watchdog`; keep it that way unless there is a strong reason.
 - The version lives in `tickle/__init__.py` (`__version__`) and is read by hatchling.
 - Record user-visible changes and fixes under "Unreleased" in `CHANGELOG.md`.

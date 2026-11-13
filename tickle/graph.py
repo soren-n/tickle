@@ -1,5 +1,4 @@
 # External module dependencies
-from typing import Deque, Optional, List, Dict, Set
 from collections import deque
 
 # Internal module dependencies
@@ -8,16 +7,16 @@ from .evaluate import Task, Program
 ###############################################################################
 # Functions
 ###############################################################################
-def has_cycle(nodes : List[Task]) -> bool:
+def has_cycle(nodes : list[Task]) -> bool:
     # Depth-first search from every node; a dependency found on the current
     # path closes a cycle. Searching only from nodes without dependencies
     # would miss cycles that no such node leads into.
-    checked : Set[Task] = set()
+    checked : set[Task] = set()
     for root_node in nodes:
         if root_node in checked: continue
-        path : List[Task] = [root_node]
-        on_path : Set[Task] = {root_node}
-        stack : List[List[Task]] = [list(root_node.get_deps())]
+        path : list[Task] = [root_node]
+        on_path : set[Task] = {root_node}
+        stack : list[list[Task]] = [list(root_node.get_deps())]
         while len(stack) != 0:
             node_deps = stack[-1]
             if len(node_deps) == 0:
@@ -36,17 +35,17 @@ def has_cycle(nodes : List[Task]) -> bool:
             stack.append(list(node_dep.get_deps()))
     return False
 
-Graph = List[Task]
+Graph = list[Task]
 
 def get_leafs(graph : Graph):
     return list(filter(lambda node: len(node.get_deps()) == 0, graph))
 
-def topological_order(graph : Graph) -> List[Task]:
+def topological_order(graph : Graph) -> list[Task]:
     """The tasks of an acyclic graph, each after all of its dependencies."""
-    waiting : Dict[Task, int] = {
+    waiting : dict[Task, int] = {
         node : len(node.get_deps()) for node in graph
     }
-    result : List[Task] = get_leafs(graph)
+    result : list[Task] = get_leafs(graph)
     index = 0
     while index < len(result):
         node = result[index]
@@ -69,19 +68,19 @@ def propagate(graph : Graph):
             if not src.get_active(): dst.set_active(False)
 
 def _levels(
-    nodes : List[int],
-    deps : Dict[int, Set[int]],
-    refs : Dict[int, Set[int]],
-    barriers : Set[int]
-    ) -> List[List[int]]:
+    nodes : list[int],
+    deps : dict[int, set[int]],
+    refs : dict[int, set[int]],
+    barriers : set[int]
+    ) -> list[list[int]]:
     """The nodes of an acyclic graph grouped by level, where a node's level
     is one more than the highest level of its dependencies. A barrier only
     passes its level on: it shares the level of the nodes after it rather
     than taking one of its own, which would hold them back a level."""
-    waiting : Dict[int, int] = { node : len(deps[node]) for node in nodes }
-    level : Dict[int, int] = { node : 0 for node in nodes }
-    ready : Deque[int] = deque(node for node in nodes if waiting[node] == 0)
-    result : Dict[int, List[int]] = dict()
+    waiting : dict[int, int] = { node : len(deps[node]) for node in nodes }
+    level : dict[int, int] = { node : 0 for node in nodes }
+    ready : deque[int] = deque(node for node in nodes if waiting[node] == 0)
+    result : dict[int, list[int]] = dict()
     while len(ready) != 0:
         node = ready.popleft()
         result.setdefault(level[node], []).append(node)
@@ -92,14 +91,14 @@ def _levels(
             if waiting[ref] == 0: ready.append(ref)
     return [ result[index] for index in sorted(result) ]
 
-def _order(tasks : List[Task]) -> List[List[int]]:
+def _order(tasks : list[Task]) -> list[list[int]]:
     """The positions of the tasks grouped into levels: each task after its
     dependencies among the tasks and after the tasks of the earlier stages
     of its flows. Raises RuntimeError if the dependencies form a cycle with
     the stage order, since no task of such a cycle can ever start."""
-    uids : Dict[Task, int] = { task : uid for uid, task in enumerate(tasks) }
-    deps : Dict[int, Set[int]] = dict()
-    refs : Dict[int, Set[int]] = dict()
+    uids : dict[Task, int] = { task : uid for uid, task in enumerate(tasks) }
+    deps : dict[int, set[int]] = dict()
+    refs : dict[int, set[int]] = dict()
     for uid, task in enumerate(tasks):
         deps[uid] = { uids[dep] for dep in task.get_deps() if dep in uids }
         refs[uid] = { uids[ref] for ref in task.get_refs() if ref in uids }
@@ -108,14 +107,14 @@ def _order(tasks : List[Task]) -> List[List[int]]:
     # stages before it. One barrier node between consecutive stages orders
     # them, where an edge from every task of one stage to every task of the
     # next would make the graph quadratic in their size.
-    stages_by_flow : Dict[str, Dict[int, List[int]]] = dict()
+    stages_by_flow : dict[str, dict[int, list[int]]] = dict()
     for uid, task in enumerate(tasks):
         for flow, stage in task.get_flows().items():
             stages_by_flow.setdefault(flow, dict()).setdefault(stage, []).append(uid)
     next_uid = len(tasks)
     for flow in sorted(stages_by_flow.keys()):
         stages = stages_by_flow[flow]
-        previous : Optional[List[int]] = None
+        previous : list[int] | None = None
         for stage in sorted(stages.keys()):
             current = stages[stage]
             if previous is not None:
@@ -162,7 +161,7 @@ def compile(graph : Graph) -> Program:
     # tasks after an out-of-date task out of date, so no search is needed;
     # searching down from the tasks nothing depends on stopped at skipped
     # tasks and missed the tasks only they needed.
-    tasks : List[Task] = [
+    tasks : list[Task] = [
         task for task in graph
         if not task.get_valid() and task.get_active()
     ]

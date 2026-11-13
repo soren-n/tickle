@@ -1,6 +1,7 @@
 # External module dependencies
 from dataclasses import is_dataclass
-from typing import cast, get_origin, get_args, Any, Callable, Union, List, Dict, Tuple
+from typing import cast, get_origin, get_args, Any, Union
+from collections.abc import Callable
 from inspect import signature
 
 ###############################################################################
@@ -11,8 +12,8 @@ DataspecValue = Union[
     'Dataspec'
 ]
 Dataspec = Union[
-    List['DataspecValue'],
-    Dict[str, 'DataspecValue']
+    list['DataspecValue'],
+    dict[str, 'DataspecValue']
 ]
 
 ###############################################################################
@@ -20,9 +21,9 @@ Dataspec = Union[
 ###############################################################################
 # The fields of each dataclass, as (name, type); looking up the signature
 # for every value took half the time of decoding a large agenda
-_FIELDS : Dict[type, List[Tuple[str, Any]]] = {}
+_FIELDS : dict[type, list[tuple[str, Any]]] = {}
 
-def _fields(T : type) -> List[Tuple[str, Any]]:
+def _fields(T : type) -> list[tuple[str, Any]]:
     if T not in _FIELDS:
         _FIELDS[T] = [
             (name, parameter.annotation)
@@ -32,7 +33,7 @@ def _fields(T : type) -> List[Tuple[str, Any]]:
 
 class DecodeError(TypeError):
     """A value that does not fit its type, with where it was found."""
-    def __init__(self, message : str, where : List[str]):
+    def __init__(self, message : str, where : list[str]):
         super().__init__(message)
         self.message = message
         self.where = where
@@ -85,13 +86,13 @@ def decode(T : type, value : Any) -> Any:
                 T.__name__, S.__name__, str(value)
             ))
 
-    def _list(T : type, value : Any) -> List[Any]:
+    def _list(T : type, value : Any) -> list[Any]:
         if not isinstance(value, list):
             raise TypeError(
                 'Expected a type of List[T] but got %s for value \"%s\"' % (
                 type(value).__name__, str(value)
             ))
-        value = cast(List[Any], value)
+        value = cast(list[Any], value)
         args = get_args(T)
         if len(args) != 1:
             raise TypeError(
@@ -102,13 +103,13 @@ def decode(T : type, value : Any) -> Any:
             for index, item in enumerate(value)
         ]
 
-    def _dict(T : type, value : Any) -> Dict[Any, Any]:
+    def _dict(T : type, value : Any) -> dict[Any, Any]:
         if not isinstance(value, dict):
             raise TypeError(
                 'Expected a type of dict but got %s' % (
                 type(value).__name__
             ))
-        value = cast(Dict[Any, Any], value)
+        value = cast(dict[Any, Any], value)
         args = get_args(T)
         if len(args) != 2:
             raise TypeError(
@@ -146,7 +147,7 @@ def encode(T : type, value : Any) -> Dataspec:
 
     def _document(T : type, value : Any) -> Any:
         if not is_dataclass(T): return _composite(T, value)
-        result : Dict[str, Any] = {}
+        result : dict[str, Any] = {}
         for l, t in _fields(T):
             if l not in value.__dict__:
                 raise TypeError('Expected dataclass to define field %s' % l)
@@ -167,7 +168,7 @@ def encode(T : type, value : Any) -> Dataspec:
                 'Expected a type of List[T] but got %s for value \"%s\"' % (
                 type(value).__name__, str(value)
             ))
-        value = cast(List[Any], value)
+        value = cast(list[Any], value)
         args = get_args(T)
         if len(args) != 1:
             raise TypeError('Expected list type to have exactly one parameter')
@@ -180,7 +181,7 @@ def encode(T : type, value : Any) -> Dataspec:
                 'but got %s for value \"%s\"' % (
                 type(value).__name__, str(value)
             ))
-        value = cast(Dict[Any, Any], value)
+        value = cast(dict[Any, Any], value)
         args = get_args(T)
         if len(args) != 2:
             raise TypeError('Expected dict type to have exactly two parameters')

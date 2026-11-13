@@ -1,6 +1,6 @@
 # External module dependencies
 from dataclasses import dataclass, field
-from typing import Callable, List, Dict, Set
+from collections.abc import Callable
 from pathlib import Path
 import hashlib
 import json
@@ -17,27 +17,27 @@ from . import dataspec
 class Task:
     desc: str
     proc: str
-    flows: List[str]
-    args: Dict[str, List[str]]
-    inputs: List[str]
-    outputs: List[str]
+    flows: list[str]
+    args: dict[str, list[str]]
+    inputs: list[str]
+    outputs: list[str]
 
 @dataclass
 class Agenda:
-    procs: Dict[str, List[str]] = field(default_factory = dict)
-    flows: Dict[str, List[List[str]]] = field(default_factory = dict)
-    tasks: List[Task] = field(default_factory = list)
+    procs: dict[str, list[str]] = field(default_factory = dict)
+    flows: dict[str, list[list[str]]] = field(default_factory = dict)
+    tasks: list[Task] = field(default_factory = list)
 
 @dataclass
 class CompiledTask:
     hash: str
     description: str
-    flows: Dict[str, int]
-    command: List[str]
-    inputs: Set[Path]
-    outputs: Set[Path]
+    flows: dict[str, int]
+    command: list[str]
+    inputs: set[Path]
+    outputs: set[Path]
 
-CompiledAgenda = List[CompiledTask]
+CompiledAgenda = list[CompiledTask]
 
 ###############################################################################
 # Functions
@@ -79,18 +79,18 @@ def store(agenda_path : Path, agenda_data : Agenda):
         )
 
 def compile(target_dir : Path, agenda_data : Agenda) -> CompiledAgenda:
-    def _compile_proc(template : List[str]) -> Callable[..., List[str]]:
+    def _compile_proc(template : list[str]) -> Callable[..., list[str]]:
         # Build the argument vector word by word: a literal word stays one
         # word, and a $parameter word becomes one word per argument value.
         # Joining into a string and splitting it again would break literal
         # words with spaces, values with quotes, and words with % in them.
         params = [ part[1:] for part in template if part.startswith('$') ]
 
-        def _apply(**args : List[str]) -> List[str]:
+        def _apply(**args : list[str]) -> list[str]:
             for param in params:
                 if param in args: continue
                 raise KeyError(param)
-            result : List[str] = []
+            result : list[str] = []
             for part in template:
                 if part.startswith('$'): result.extend(args[part[1:]])
                 else: result.append(part)
@@ -105,7 +105,7 @@ def compile(target_dir : Path, agenda_data : Agenda) -> CompiledAgenda:
         try: return Path(os.path.relpath(absolute, target_dir)).as_posix()
         except ValueError: return absolute.as_posix() # another drive
 
-    def _task_hash(task_data : Task, command : List[str]) -> str:
+    def _task_hash(task_data : Task, command : list[str]) -> str:
         # The command is hashed rather than the proc's name, so editing a
         # proc's definition changes the tasks that use it. Flows only order
         # tasks and change no output, so they are left out, and paths are
@@ -125,7 +125,7 @@ def compile(target_dir : Path, agenda_data : Agenda) -> CompiledAgenda:
     }
 
     # Flow and stage to proc mapping
-    flow_proc_stage : Dict[str, Dict[str, int]] = {}
+    flow_proc_stage : dict[str, dict[str, int]] = {}
     for flow in agenda_data.flows:
         if flow == '':
             raise RuntimeError('A flow must have a name; found a flow named ""')
@@ -146,7 +146,7 @@ def compile(target_dir : Path, agenda_data : Agenda) -> CompiledAgenda:
                     )
                 flow_proc_stage[flow][proc] = index
 
-    def _command(task_data : Task) -> List[str]:
+    def _command(task_data : Task) -> list[str]:
         try: return procs[task_data.proc](**task_data.args)
         except KeyError as error:
             raise RuntimeError(

@@ -1,5 +1,4 @@
 # External module dependencies
-from typing import Dict, List, Set
 from pathlib import Path
 import yaml
 
@@ -10,8 +9,8 @@ from . import dataspec
 ###############################################################################
 # Datatypes
 ###############################################################################
-Depend = Dict[str, List[str]]
-CompiledDepend = Dict[Path, Set[Path]]
+Depend = dict[str, list[str]]
+CompiledDepend = dict[Path, set[Path]]
 
 ###############################################################################
 # Functions

@@ -1,5 +1,5 @@
 # External module dependencies
-from typing import Callable, List, Optional, Tuple, Dict
+from collections.abc import Callable
 from threading import RLock
 from pathlib import Path
 from enum import Enum
@@ -43,10 +43,10 @@ class FileWatcher(FileSystemEventHandler):
         super().__init__()
         self._lock = RLock()
         self._observer = Observer()
-        self._callbacks : Dict[Path, EventHandler] = {}
-        self._watched : Dict[Path, Path] = {}
-        self._watch_objs : Dict[Path, ObservedWatch] = {}
-        self._watch_count : Dict[Path, int] = {}
+        self._callbacks : dict[Path, EventHandler] = {}
+        self._watched : dict[Path, Path] = {}
+        self._watch_objs : dict[Path, ObservedWatch] = {}
+        self._watch_count : dict[Path, int] = {}
 
     def _watch(self, dir_path : Path):
         if dir_path in self._watch_count:
@@ -78,11 +78,11 @@ class FileWatcher(FileSystemEventHandler):
             del self._callbacks[_file_path]
             self._unwatch(self._watched.pop(_file_path))
 
-    def _descend(self) -> List[Tuple[EventHandler, Event]]:
+    def _descend(self) -> list[tuple[EventHandler, Event]]:
         # Move the watches of files whose folders were missing down to the
         # nearest folder that exists now. A file may have been created
         # before its folder was watched, so report the files that exist.
-        result : List[Tuple[EventHandler, Event]] = []
+        result : list[tuple[EventHandler, Event]] = []
         with self._lock:
             for file_path, dir_path in list(self._watched.items()):
                 if dir_path == file_path.parent: continue
@@ -102,7 +102,7 @@ class FileWatcher(FileSystemEventHandler):
         self._observer.stop()
         self._observer.join()
 
-    def _callback(self, path : Optional[str]) -> Optional[EventHandler]:
+    def _callback(self, path : str | None) -> EventHandler | None:
         if not path: return None
         with self._lock: return self._callbacks.get(Path(path))
 
@@ -114,7 +114,7 @@ class FileWatcher(FileSystemEventHandler):
             'moved': Event.Moved
         }.get(event.event_type)
         if kind is None: return
-        calls : List[Tuple[EventHandler, Event]] = []
+        calls : list[tuple[EventHandler, Event]] = []
         if event.is_directory:
             calls = self._descend()
         else:

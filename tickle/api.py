@@ -1,5 +1,6 @@
 # External module dependencies
-from typing import Any, Callable, Optional, Tuple, List, Dict, Set
+from typing import Any
+from collections.abc import Callable
 from multiprocessing import cpu_count
 from functools import partial
 from pathlib import Path
@@ -34,9 +35,9 @@ def default_worker_count() -> int:
 ###############################################################################
 # Files
 ###############################################################################
-Stat = Tuple[int, int]
+Stat = tuple[int, int]
 
-def _hash(file_path : Path) -> Optional[str]:
+def _hash(file_path : Path) -> str | None:
     if file_path.is_dir():
         raise RuntimeError(
             '%s is a folder; tickle can only track files' % file_path
@@ -47,7 +48,7 @@ def _hash(file_path : Path) -> Optional[str]:
     except FileNotFoundError:
         return None
 
-def _stat(file_path : Path) -> Optional[Stat]:
+def _stat(file_path : Path) -> Stat | None:
     try: stat = os.stat(file_path)
     except FileNotFoundError: return None
     return stat.st_mtime_ns, stat.st_size
@@ -117,14 +118,14 @@ def _load_depend(depend_path : Path) -> depend.CompiledDepend:
 def _depend_closures(
     agenda_data : agenda.CompiledAgenda,
     depend_data : depend.CompiledDepend
-    ) -> Dict[str, Set[str]]:
+    ) -> dict[str, set[str]]:
     """For each file named in the depend file, every file it depends on
     through the depend file, directly or not."""
 
-    def _join_graphs() -> Dict[str, Set[str]]:
+    def _join_graphs() -> dict[str, set[str]]:
         # Tasks as edges from their outputs to their inputs, joined with the
         # depend file, to check for cycles between the two
-        result : Dict[str, Set[str]] = dict()
+        result : dict[str, set[str]] = dict()
         for task_data in agenda_data:
             dsts = { str(file_path) for file_path in task_data.inputs }
             for src in task_data.outputs:
@@ -135,15 +136,15 @@ def _depend_closures(
             result[src].update(str(dst_path) for dst_path in dst_paths)
         return result
 
-    def _has_cycle(graph : Dict[str, Set[str]]) -> bool:
+    def _has_cycle(graph : dict[str, set[str]]) -> bool:
         # Depth-first search from every node; a dependency found on the
         # current path closes a cycle.
-        checked : Set[str] = set()
+        checked : set[str] = set()
         for root_node in graph.keys():
             if root_node in checked: continue
-            path : List[str] = [root_node]
-            on_path : Set[str] = {root_node}
-            stack : List[List[str]] = [list(graph.get(root_node, ()))]
+            path : list[str] = [root_node]
+            on_path : set[str] = {root_node}
+            stack : list[list[str]] = [list(graph.get(root_node, ()))]
             while len(stack) != 0:
                 node_deps = stack[-1]
                 if len(node_deps) == 0:
@@ -166,11 +167,11 @@ def _depend_closures(
     # Closures over the depend file alone: the inputs of the task producing
     # a file are that task's business, and a change to them reaches the
     # tasks after it through propagation
-    deps : Dict[str, Set[str]] = {
+    deps : dict[str, set[str]] = {
         str(src_path) : { str(dst_path) for dst_path in dst_paths }
         for src_path, dst_paths in depend_data.items()
     }
-    closures : Dict[str, Set[str]] = dict()
+    closures : dict[str, set[str]] = dict()
     for root in deps:
         if root in closures: continue
         stack = [(root, iter(deps[root]))]
@@ -179,7 +180,7 @@ def _depend_closures(
             child = next(children, None)
             if child is None:
                 stack.pop()
-                closure : Set[str] = set()
+                closure : set[str] = set()
                 for dep in deps[node]:
                     closure.add(dep)
                     closure.update(closures.get(dep, ()))
@@ -191,15 +192,15 @@ def _depend_closures(
 
 def _task_closure(
     task_data : agenda.CompiledTask,
-    closures : Dict[str, Set[str]]
-    ) -> Set[str]:
+    closures : dict[str, set[str]]
+    ) -> set[str]:
     inputs = { str(input) for input in task_data.inputs }
     result = set(inputs)
     for input in inputs: result.update(closures.get(input, ()))
     return result
 
 def _make_dirs(target_dir : Path, cache : Cache, file_path : Path):
-    created : List[Path] = list()
+    created : list[Path] = list()
     for parent_path in reversed(file_path.parents):
         if parent_path.exists(): continue
         try: os.mkdir(parent_path)
@@ -217,8 +218,8 @@ def _eval_cmd(
     target_dir : Path,
     cache : Cache,
     task_data : agenda.CompiledTask,
-    closure : Set[str]
-    ) -> Optional[str]:
+    closure : set[str]
+    ) -> str | None:
     log.debug('%s: %s' % (
         task_data.description,
         ' '.join(task_data.command)
@@ -289,16 +290,16 @@ def _eval_cmd(
 def _make_graph(
     target_dir : Path,
     agenda_data : agenda.CompiledAgenda,
-    closures : Dict[str, Set[str]],
+    closures : dict[str, set[str]],
     cache : Cache
-    ) -> Tuple[List[Task], List[Set[str]]]:
+    ) -> tuple[list[Task], list[set[str]]]:
     """The tasks of the agenda with their dependencies, and the input closure
     of each task."""
 
     # Create tasks
-    tasks : List[Task] = list()
-    task_closures : List[Set[str]] = list()
-    output_map : Dict[str, int] = dict()
+    tasks : list[Task] = list()
+    task_closures : list[set[str]] = list()
+    output_map : dict[str, int] = dict()
     for index, task_data in enumerate(agenda_data):
         closure = _task_closure(task_data, closures)
         task_closures.append(closure)
@@ -340,24 +341,24 @@ def _make_graph(
 
 def _implicits(
     agenda_data : agenda.CompiledAgenda,
-    task_closures : List[Set[str]]
-    ) -> Set[str]:
+    task_closures : list[set[str]]
+    ) -> set[str]:
     """Files the tasks read only through the depend file."""
-    explicits : Set[str] = set()
+    explicits : set[str] = set()
     for task_data in agenda_data:
         explicits.update(str(input) for input in task_data.inputs)
         explicits.update(str(output) for output in task_data.outputs)
-    result : Set[str] = set()
+    result : set[str] = set()
     for closure in task_closures: result.update(closure)
     return result.difference(explicits)
 
 def _make_schedule(
     target_dir : Path,
-    tasks : List[Task],
+    tasks : list[Task],
     agenda_data : agenda.CompiledAgenda,
-    task_closures : List[Set[str]],
+    task_closures : list[set[str]],
     cache : Cache
-    ) -> Tuple[Program, List[str]]:
+    ) -> tuple[Program, list[str]]:
     """Decide which tasks are out of date and which cannot run, and compile
     the program performing the first; also returns the descriptions of the
     tasks that cannot run. Reads the recorded input hashes but never changes
@@ -369,10 +370,10 @@ def _make_schedule(
         task.set_active(True)
 
     # Disable impossible tasks
-    position : Dict[Task, int] = {
+    position : dict[Task, int] = {
         task : index for index, task in enumerate(tasks)
     }
-    outputs : Set[str] = set()
+    outputs : set[str] = set()
     for task in graph.topological_order(tasks[:task_count]):
         task_data = agenda_data[position[task]]
 
@@ -405,9 +406,9 @@ def _make_schedule(
     # Compare the input closures with those recorded when each task last
     # succeeded; a task without a record has not succeeded since it last
     # changed
-    recorded : Dict[str, Dict[str, Optional[str]]] = cache['tasks']
-    hashes : Dict[str, Optional[str]] = dict()
-    def _current_hash(file_path : str) -> Optional[str]:
+    recorded : dict[str, dict[str, str | None]] = cache['tasks']
+    hashes : dict[str, str | None] = dict()
+    def _current_hash(file_path : str) -> str | None:
         if file_path not in hashes: hashes[file_path] = _hash(Path(file_path))
         return hashes[file_path]
     for index in range(task_count):
@@ -477,7 +478,7 @@ class OfflineEvaluator(Evaluator):
         super().__init__(worker_count)
         self._target_dir = target_dir
         self._depend_path = depend_path
-        self.skipped : List[str] = list()
+        self.skipped : list[str] = list()
 
         # Setup cache and file watcher
         self._cache = Cache(cache_path)
@@ -633,13 +634,13 @@ class OnlineEvaluator(Evaluator):
         self._watcher = FileWatcher()
 
         # Initial load of agenda and depend
-        self._explicits : Set[str] = set()
-        self._implicits : Set[str] = set()
-        self._tasks : List[Task] = list()
-        self._task_closures : List[Set[str]] = list()
-        self._agenda_hash : Optional[str] = _hash(agenda_path)
-        self._depend_hash : Optional[str] = _hash(depend_path)
-        self._source_hashes : Dict[str, Optional[str]] = dict()
+        self._explicits : set[str] = set()
+        self._implicits : set[str] = set()
+        self._tasks : list[Task] = list()
+        self._task_closures : list[set[str]] = list()
+        self._agenda_hash : str | None = _hash(agenda_path)
+        self._depend_hash : str | None = _hash(depend_path)
+        self._source_hashes : dict[str, str | None] = dict()
         self._update_agenda()
 
         # Setup file watching
@@ -700,7 +701,7 @@ class OnlineEvaluator(Evaluator):
                 'error: %s: %s' % (type(error).__name__, error))
         finally: self.resume()
 
-    def _watch(self, current : Set[str], files : Set[str]):
+    def _watch(self, current : set[str], files : set[str]):
         for file_path in current.difference(files):
             self._watcher.unsubscribe(Path(file_path))
             self._source_hashes.pop(file_path, None)
@@ -723,9 +724,9 @@ class OnlineEvaluator(Evaluator):
         self._rebuild(self._agenda_data)
 
     def _rebuild(self, agenda_data : agenda.CompiledAgenda):
-        def _explicits() -> Set[str]:
-            inputs : Set[str] = set()
-            outputs : Set[str] = set()
+        def _explicits() -> set[str]:
+            inputs : set[str] = set()
+            outputs : set[str] = set()
             for task_data in agenda_data:
                 inputs.update(str(input) for input in task_data.inputs)
                 outputs.update(str(output) for output in task_data.outputs)
@@ -795,7 +796,7 @@ def online(
     depend_path : Path,
     cache_path : Path,
     worker_count : int = default_worker_count()
-    ) -> Optional[OnlineEvaluator]:
+    ) -> OnlineEvaluator | None:
 
     assert target_dir.is_absolute()
     assert agenda_path.is_relative_to(target_dir)
@@ -826,9 +827,9 @@ def online(
 # Clean mode
 ###############################################################################
 def _sources(
-    agenda_path : Optional[Path],
-    depend_path : Optional[Path]
-    ) -> Set[str]:
+    agenda_path : Path | None,
+    depend_path : Path | None
+    ) -> set[str]:
     """Files the agenda or depend file read that no task produces."""
     agenda_data : agenda.CompiledAgenda = list()
     if agenda_path is not None and agenda_path.exists():
@@ -836,8 +837,8 @@ def _sources(
     depend_data : depend.CompiledDepend = dict()
     if depend_path is not None and depend_path.exists():
         depend_data = _load_depend(depend_path)
-    outputs : Set[str] = set()
-    result : Set[str] = set()
+    outputs : set[str] = set()
+    result : set[str] = set()
     for task_data in agenda_data:
         outputs.update(str(output) for output in task_data.outputs)
         result.update(str(input) for input in task_data.inputs)
@@ -849,8 +850,8 @@ def _sources(
 def clean(
     target_dir : Path,
     cache_path : Path,
-    agenda_path : Optional[Path] = None,
-    depend_path : Optional[Path] = None
+    agenda_path : Path | None = None,
+    depend_path : Path | None = None
     ) -> bool:
 
     assert target_dir.is_absolute()
@@ -869,8 +870,8 @@ def clean(
 
     # Generated files and folders as absolute paths; a cache written before
     # version 2 recorded absolute paths and no file stats
-    files : Dict[str, Any] = dict()
-    folders : Set[str] = set()
+    files : dict[str, Any] = dict()
+    folders : set[str] = set()
     if cache.get('version') == _CACHE_VERSION:
         files = {
             str(_abs(target_dir, rel_path)) : stat

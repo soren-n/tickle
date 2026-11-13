@@ -1,5 +1,5 @@
 # External module dependencies
-from typing import Any, Dict
+from typing import Any
 from threading import RLock
 from pathlib import Path
 import pickle
@@ -25,11 +25,11 @@ class Cache:
         self.lock = RLock()
         self._dirty : bool = False
         self._written : float = 0.0
-        self._data : Dict[str, Any] = (
+        self._data : dict[str, Any] = (
             self._load() if cache_path.exists() else {}
         )
 
-    def _load(self) -> Dict[str, Any]:
+    def _load(self) -> dict[str, Any]:
         try:
             with self._path.open('rb') as file:
                 data = pickle.load(file)

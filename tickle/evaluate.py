@@ -1,5 +1,5 @@
 # External module dependencies
-from typing import Callable, Optional, Tuple, List, Dict, Set
+from collections.abc import Callable
 from threading import Event, Thread
 from queue import Queue, Empty
 
@@ -19,10 +19,10 @@ class TaskError(Exception):
 ###############################################################################
 # Classes
 ###############################################################################
-Work = Callable[[], Optional[str]]
+Work = Callable[[], str | None]
 class Task:
     def __init__(self,
-        flows : Dict[str, int],
+        flows : dict[str, int],
         work : Work,
         force : bool = False,
         description : str = ''
@@ -31,18 +31,18 @@ class Task:
         self._valid : bool = False
         self._active : bool = True
         self._force : bool = force
-        self._deps : Set['Task'] = set()
-        self._refs : Set['Task'] = set()
-        self._flows : Dict[str, int] = flows
+        self._deps : set[Task] = set()
+        self._refs : set[Task] = set()
+        self._flows : dict[str, int] = flows
         self._work : Work = work
 
     def __hash__(self):
         return hash(id(self))
 
-    def get_deps(self) -> Set['Task']:
+    def get_deps(self) -> set['Task']:
         return self._deps
 
-    def get_refs(self) -> Set['Task']:
+    def get_refs(self) -> set['Task']:
         return self._refs
 
     def get_flows(self):
@@ -73,7 +73,7 @@ class Task:
         self._deps.add(other)
         other._refs.add(self)
 
-    def add_dependencies(self, others : List['Task']):
+    def add_dependencies(self, others : list['Task']):
         for other in others: self.add_dependency(other)
 
     def remove_dependency(self, other : 'Task'):
@@ -81,7 +81,7 @@ class Task:
         self._deps.remove(other)
         other._refs.remove(self)
 
-    def remove_dependencies(self, others : List['Task']):
+    def remove_dependencies(self, others : list['Task']):
         for other in others:
             if other not in self._deps: continue
             self._deps.remove(other)
@@ -92,12 +92,12 @@ class Task:
             other._refs.remove(self)
         self._deps = set()
 
-    def perform(self) -> Optional[str]:
+    def perform(self) -> str | None:
         return self._work()
 
 class Worker(Thread):
     def __init__(self,
-        dequeue : Callable[[Callable[[List[Task]], None]], None],
+        dequeue : Callable[[Callable[[list[Task]], None]], None],
         index : int
         ):
         super().__init__()
@@ -108,7 +108,7 @@ class Worker(Thread):
         # and leave the worker looping forever.
         self._stopped = Event()
 
-    def _work(self, sequence : List[Task]):
+    def _work(self, sequence : list[Task]):
         for task in sequence:
             try: output = task.perform()
             except TaskError: raise
@@ -127,8 +127,8 @@ class Worker(Thread):
     def stop(self):
         self._stopped.set()
 
-Batch = List[Task]
-Program = List[List[Batch]]
+Batch = list[Task]
+Program = list[list[Batch]]
 
 # How long an idle worker waits for work before checking whether it was
 # stopped, and how long the idle main loop waits before checking again;
@@ -145,8 +145,8 @@ class Evaluator:
         # generation of the program its task belonged to, so a failure in
         # an old program never cancels the program that replaced it.
         self._generation : int = 0
-        self._queue : Queue[Tuple[int, List[Task]]] = Queue()
-        self._exception : Queue[Tuple[int, TaskError]] = Queue()
+        self._queue : Queue[tuple[int, list[Task]]] = Queue()
+        self._exception : Queue[tuple[int, TaskError]] = Queue()
         self._pause = SingleWriteMultipleReadLock()
         self._wake = Event()
         # Set by stop(), from any thread and possibly before start(); once
@@ -158,7 +158,7 @@ class Evaluator:
             for index in range(max(1, worker_count))
         ]
 
-    def _dequeue(self, perform : Callable[[List[Task]], None]):
+    def _dequeue(self, perform : Callable[[list[Task]], None]):
         # Workers hold the read side of the pause lock while they take and
         # perform a sequence, so pause() waits for running sequences.
         self._pause.acquire_read()
@@ -182,10 +182,10 @@ class Evaluator:
         finally:
             self._pause.release_read()
 
-    def _check(self) -> Set[int]:
+    def _check(self) -> set[int]:
         # Report every error that arrived, and return the generations of the
         # programs they came from; those programs must be dropped.
-        failed : Set[int] = set()
+        failed : set[int] = set()
         while True:
             try: generation, error = self._exception.get(block = False)
             except Empty: return failed
@@ -215,7 +215,7 @@ class Evaluator:
         """Called by the main loop when it has nothing to queue."""
         pass
 
-    def _next_batch(self) -> Optional[List[Batch]]:
+    def _next_batch(self) -> list[Batch] | None:
         # Reprogramming happens under the write side of the pause lock, so
         # taking the batch under the read side never queues a stale one.
         self._pause.acquire_read()
