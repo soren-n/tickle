@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- Folders as inputs and outputs: a path ending with `/` names a folder. A task reading one reruns when a file in it changes, appears or goes; a task writing one gets it created, and before it runs again the files its last run left there, and that nobody changed, are removed. A task reading a file inside another task's output folder runs after it.
+- Early cutoff: a task that reruns and writes what it wrote before no longer reruns the tasks after it.
+- Per-task depfiles (`depfile` on a task): after the task succeeds, the files its make-syntax depfile names, such as the headers `gcc -MD` lists, count as its inputs.
+- A dry run says why each task would run: new or changed, which input changed, which output is missing, or which task it reads from. `Result.reasons` holds the same.
+
+### Changed
+
+- A task out of date only because a task it reads from runs is checked again when it is about to start, and left alone if its inputs came out unchanged; such a task is neither printed nor listed as succeeded.
+
 ## 0.6.0
 
 ### Upgrading

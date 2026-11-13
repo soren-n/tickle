@@ -7,6 +7,7 @@ from functools import partial
 from threading import Lock, Timer
 from pathlib import Path
 import hashlib
+import json
 import stat
 import time
 import re
@@ -21,6 +22,7 @@ from .process import Process, tail
 from .cache import Cache
 from . import agenda
 from . import depend
+from . import depfile
 from . import graph
 from . import log
 
@@ -62,8 +64,9 @@ class Result:
     # Did not run because a task they read from failed (keep going), or
     # because the run stopped after a failure
     blocked : list[str] = field(default_factory = list)
-    # The tasks a dry run would run, in an order they could run in
+    # The tasks a dry run would run, in an order they could run in, and why
     planned : list[str] = field(default_factory = list)
+    reasons : dict[str, str] = field(default_factory = dict)
     # Why the run could not start, such as an invalid agenda
     error : str | None = None
 
@@ -107,6 +110,20 @@ def _rel(target_dir : Path, file_path : Any) -> str:
 
 def _abs(target_dir : Path, rel_path : str) -> Path:
     return Path(os.path.normpath(os.path.join(target_dir, rel_path)))
+
+def _folder_key(path : Path) -> str:
+    # In input closures a folder is its path with a trailing separator, so
+    # it is not taken for a file of that name
+    return str(path) + os.sep
+
+def _is_folder_key(path : str) -> bool:
+    return path.endswith(os.sep)
+
+def _key(target_dir : Path, path : str) -> str:
+    """How the cache names a closure entry: relative to the target
+    directory, with a trailing / for a folder."""
+    rel_path = _rel(target_dir, path)
+    return rel_path + '/' if _is_folder_key(path) else rel_path
 
 def _is_inside(rel_path : str) -> bool:
     if os.path.isabs(rel_path): return False
@@ -190,11 +207,14 @@ def _prune_cache(
     # date, although its outputs were last written by the other definition.
     # Stats of files no task reads any more go too.
     current = { task_data.hash for task_data in agenda_data }
-    read = {
-        _rel(target_dir, file_path)
-        for closure in task_closures
-        for file_path in closure
-    }
+    read : set[str] = set()
+    folders : list[str] = []
+    for task_data, closure in zip(agenda_data, task_closures, strict = True):
+        for file_path in _full_closure(target_dir, cache, task_data, closure):
+            if _is_folder_key(file_path):
+                folders.append(_rel(target_dir, file_path) + os.sep)
+            else:
+                read.add(_rel(target_dir, file_path))
     with cache.lock:
         tasks = cache['tasks']
         for task_hash in list(tasks.keys()):
@@ -203,18 +223,42 @@ def _prune_cache(
         stats = cache['stats']
         for rel_path in list(stats.keys()):
             if rel_path in read: continue
+            if any(rel_path.startswith(folder) for folder in folders): continue
             del stats[rel_path]
         cache.changed()
+
+def _tree_hash(target_dir : Path, cache : Cache, dir_key : str) -> str | None:
+    """A hash of a folder: of the names of everything in it, at any depth,
+    and the hashes of its files; None if it does not exist."""
+    dir_path = dir_key.rstrip(os.sep)
+    if not os.path.isdir(dir_path):
+        if os.path.exists(dir_path):
+            raise RuntimeError('%s is a file, not a folder' % dir_path)
+        return None
+    entries : list[list[str | None]] = []
+    for root, dirs, files in os.walk(dir_path):
+        dirs.sort()
+        rel_root = Path(os.path.relpath(root, dir_path))
+        for name in dirs:
+            entries.append([(rel_root / name).as_posix() + '/', None])
+        for name in sorted(files):
+            entries.append([
+                (rel_root / name).as_posix(),
+                _file_hash(target_dir, cache, os.path.join(root, name))
+            ])
+    return hashlib.md5(json.dumps(entries).encode('utf-8')).hexdigest()
 
 def _file_hash(target_dir : Path, cache : Cache, file_path : str) -> str | None:
     """The MD5 of a file, or None if it does not exist; taken from the
     cache when the file's size and modification time match those recorded
-    with it, and the record is not too close to the modification."""
+    with it, and the record is not too close to the modification. A folder
+    key gives the hash of the folder."""
+    if _is_folder_key(file_path): return _tree_hash(target_dir, cache, file_path)
     try: file_stat = os.stat(file_path)
     except FileNotFoundError: return None
     if stat.S_ISDIR(file_stat.st_mode):
         raise RuntimeError(
-            '%s is a folder; tickle can only track files' % file_path
+            '%s is a folder; write it with a trailing / to read a folder' % file_path
         )
     rel_path = _rel(target_dir, file_path)
     with cache.lock: record = cache['stats'].get(rel_path)
@@ -236,6 +280,26 @@ def _file_hash(target_dir : Path, cache : Cache, file_path : str) -> str | None:
 
 def _record(cache : Cache, task_hash : str) -> dict[str, Any] | None:
     return cache['tasks'].get(task_hash)
+
+def _recorded_implicits(
+    target_dir : Path,
+    cache : Cache,
+    task_data : agenda.CompiledTask
+    ) -> set[str]:
+    """The files the task's depfile named when it last succeeded."""
+    with cache.lock: record = _record(cache, task_data.hash)
+    if record is None: return set()
+    return { str(_abs(target_dir, rel_path)) for rel_path in record.get('implicit', ()) }
+
+def _full_closure(
+    target_dir : Path,
+    cache : Cache,
+    task_data : agenda.CompiledTask,
+    closure : set[str]
+    ) -> set[str]:
+    """A task's input closure with the files its depfile named."""
+    if task_data.depfile is None: return closure
+    return closure | _recorded_implicits(target_dir, cache, task_data)
 
 ###############################################################################
 # Task graph util
@@ -328,9 +392,13 @@ def _task_closure(
     task_data : agenda.CompiledTask,
     closures : dict[str, set[str]]
     ) -> set[str]:
-    inputs = { str(input) for input in task_data.inputs }
-    result = set(inputs)
-    for input in inputs: result.update(closures.get(input, ()))
+    result : set[str] = set()
+    for input in task_data.inputs:
+        if input in task_data.folders:
+            result.add(_folder_key(input))
+            continue
+        result.add(str(input))
+        result.update(closures.get(str(input), ()))
     return result
 
 def _make_dirs(target_dir : Path, cache : Cache, file_path : Path):
@@ -357,6 +425,40 @@ def _log_path(log_dir : Path, task_data : agenda.CompiledTask) -> Path:
     slug = re.sub(r'[^a-z0-9]+', '-', task_data.description.lower()).strip('-')
     return log_dir / ('%s-%s.log' % (slug[:60] or 'task', task_data.hash[:8]))
 
+def _outputs_exist(task_data : agenda.CompiledTask) -> bool:
+    return all(
+        output.is_dir() if output in task_data.folders else output.is_file()
+        for output in task_data.outputs
+    )
+
+def _clear_folder(target_dir : Path, cache : Cache, folder : Path):
+    # Remove the files the last run of a task left in its output folder,
+    # those nobody changed since, so no stale file outlives a new run
+    prefix = _rel(target_dir, folder) + os.sep
+    with cache.lock:
+        recorded = [
+            (rel_path, file_stat)
+            for rel_path, file_stat in cache['files'].items()
+            if rel_path.startswith(prefix)
+        ]
+    for rel_path, file_stat in recorded:
+        file_path = _abs(target_dir, rel_path)
+        if file_stat is None or _stat(file_path) != file_stat: continue
+        try: os.remove(file_path)
+        except OSError: continue
+        with cache.lock: cache['files'].pop(rel_path, None)
+
+def _record_folder(target_dir : Path, cache : Cache, folder : Path):
+    # What the task left in its output folder is what clean may remove
+    if not folder.is_dir(): return
+    with cache.lock:
+        for root, dirs, files in os.walk(folder):
+            for name in dirs:
+                cache['folders'].add(_rel(target_dir, os.path.join(root, name)))
+            for name in files:
+                file_path = Path(root, name)
+                cache['files'][_rel(target_dir, file_path)] = _stat(file_path)
+
 def _eval_cmd(
     target_dir : Path,
     cache : Cache,
@@ -365,23 +467,43 @@ def _eval_cmd(
     closure : set[str],
     run : Run
     ) -> str | None:
+
+    # The inputs as they are now, before the command reads them; a change
+    # made while the task runs then still counts as a change afterwards
+    full_closure = _full_closure(target_dir, cache, task_data, closure)
+    input_hashes = {
+        _key(target_dir, file_path) : _file_hash(target_dir, cache, file_path)
+        for file_path in full_closure
+    }
+    run.info['inputs'] = input_hashes
+
+    # Early cutoff: a task scheduled only because a task it reads from ran
+    # is up to date after all if that task wrote what it wrote before
+    with cache.lock: record = _record(cache, task_data.hash)
+    if (not task_data.always
+        and record is not None
+        and record.get('inputs') == input_hashes
+        and _outputs_exist(task_data)):
+        log.debug('%s: up to date, its inputs came out unchanged' % (
+            task_data.description
+        ))
+        run.info['cutoff'] = True
+        return None
+
     log.debug('%s: %s' % (
         task_data.description,
         ' '.join(task_data.command)
     ))
     log.info(task_data.description)
 
-    # The inputs as they are now, before the command reads them; a change
-    # made while the task runs then still counts as a change afterwards
-    input_hashes = {
-        _rel(target_dir, file_path) : _file_hash(target_dir, cache, file_path)
-        for file_path in closure
-    }
-    run.info['inputs'] = input_hashes
-
-    # Ensure output and log folders exist
+    # Ensure output and log folders exist; an output folder is emptied of
+    # what the last run left in it
     for output_path in task_data.outputs:
-        _make_dirs(target_dir, cache, output_path)
+        if output_path in task_data.folders:
+            _clear_folder(target_dir, cache, output_path)
+            _make_dirs(target_dir, cache, output_path / 'file')
+        else:
+            _make_dirs(target_dir, cache, output_path)
     log_path = _log_path(log_dir, task_data)
     _make_dirs(target_dir, cache, log_path)
     with cache.lock:
@@ -398,9 +520,15 @@ def _eval_cmd(
         outcome = process.wait(task_data.timeout)
     finally:
         # Whatever the command left behind is what clean may remove
+        for output_path in task_data.outputs:
+            if output_path in task_data.folders:
+                _record_folder(target_dir, cache, output_path)
         with cache.lock:
             for output_path in task_data.outputs:
+                if output_path in task_data.folders: continue
                 cache['files'][_rel(target_dir, output_path)] = _stat(output_path)
+            if task_data.depfile is not None:
+                cache['files'][_rel(target_dir, task_data.depfile)] = _stat(task_data.depfile)
             cache.changed()
 
     # Check for failed evaluation
@@ -429,11 +557,42 @@ def _eval_cmd(
             task_data.description, _rel(target_dir, output_path)
         ))
 
+    # The files its depfile names now count as its inputs: those it named
+    # before were hashed when it started, new ones are hashed now
+    implicits : list[str] = []
+    if task_data.depfile is not None:
+        deps = depfile.load(task_data.depfile)
+        if deps is None:
+            log.warning('"%s" succeeded without writing its depfile %s' % (
+                task_data.description, _rel(target_dir, task_data.depfile)
+            ))
+        else:
+            own = { str(path) for path in task_data.outputs }
+            own.add(str(task_data.depfile))
+            for dep in deps:
+                dep_path = str(agenda.resolve_path(target_dir, dep))
+                if dep_path in closure or dep_path in own: continue
+                if dep_path not in implicits: implicits.append(dep_path)
+    inputs = {
+        _key(target_dir, file_path) : input_hashes[_key(target_dir, file_path)]
+        for file_path in closure
+    }
+    tracked : list[str] = []
+    for dep_path in implicits:
+        key = _key(target_dir, dep_path)
+        if key in input_hashes: inputs[key] = input_hashes[key]
+        else:
+            # A folder named in a depfile is not tracked
+            try: inputs[key] = _file_hash(target_dir, cache, dep_path)
+            except RuntimeError: continue
+        tracked.append(dep_path)
+
     # Record the inputs it ran with
     with cache.lock:
         cache['tasks'][task_data.hash] = {
-            'inputs' : input_hashes,
-            'duration' : outcome.duration
+            'inputs' : inputs,
+            'duration' : outcome.duration,
+            'implicit' : [ _rel(target_dir, dep_path) for dep_path in tracked ]
         }
         cache.changed()
     return None
@@ -480,6 +639,7 @@ def _make_graph(
     tasks : list[Task] = list()
     task_closures : list[set[str]] = list()
     output_map : dict[str, int] = dict()
+    folder_map : dict[str, int] = dict()
     weights = _weights(cache, agenda_data)
     for index, task_data in enumerate(agenda_data):
         closure = _task_closure(task_data, closures)
@@ -499,15 +659,35 @@ def _make_graph(
             if output in output_map:
                 raise RuntimeError('Multiple tasks output to %s' % output)
             output_map[output] = index
+            if file_path in task_data.folders: folder_map[output] = index
+
+    # No task writes inside another task's output folder
+    for output, index in output_map.items():
+        for parent in Path(output).parents:
+            owner = folder_map.get(str(parent))
+            if owner is None or owner == index: continue
+            raise RuntimeError(
+                'Task \"%s\" writes %s, inside the output folder of task \"%s\"' % (
+                    agenda_data[index].description, output,
+                    agenda_data[owner].description
+                )
+            )
+
+    def _producer(path : str) -> int | None:
+        # The task writing a file or folder, or the folder it lies in
+        path = path.rstrip(os.sep)
+        if path in output_map: return output_map[path]
+        for parent in Path(path).parents:
+            if str(parent) in folder_map: return folder_map[str(parent)]
+        return None
 
     # A task depends on the tasks producing its inputs, and the files its
     # inputs depend on through the depend file
     for index, dst_node in enumerate(tasks):
         dst_data = agenda_data[index]
         for input in sorted(task_closures[index]):
-            if input not in output_map: continue
-            src_index = output_map[input]
-            if src_index == index: continue
+            src_index = _producer(input)
+            if src_index is None or src_index == index: continue
             src_data = agenda_data[src_index]
             try: dst_node.add_dependency(tasks[src_index])
             except RuntimeError as e:
@@ -526,16 +706,24 @@ def _make_graph(
     return tasks, task_closures
 
 def _implicits(
+    target_dir : Path,
+    cache : Cache,
     agenda_data : agenda.CompiledAgenda,
     task_closures : list[set[str]]
     ) -> set[str]:
-    """Files the tasks read only through the depend file."""
+    """Files the tasks read only through the depend file or their
+    depfiles."""
     explicits : set[str] = set()
     for task_data in agenda_data:
         explicits.update(str(input) for input in task_data.inputs)
         explicits.update(str(output) for output in task_data.outputs)
     result : set[str] = set()
-    for closure in task_closures: result.update(closure)
+    for task_data, closure in zip(agenda_data, task_closures, strict = True):
+        result.update(
+            file_path
+            for file_path in _full_closure(target_dir, cache, task_data, closure)
+            if not _is_folder_key(file_path)
+        )
     return result.difference(explicits)
 
 def _wanted(
@@ -595,6 +783,10 @@ def _make_schedule(
         task : index for index, task in enumerate(tasks)
     }
     outputs : set[str] = set()
+    folders : set[str] = set()
+    def _produced(path : Path) -> bool:
+        if str(path) in outputs: return True
+        return any(str(parent) in folders for parent in path.parents)
     for task in graph.topological_order(tasks):
         task_data = agenda_data[position[task]]
 
@@ -608,9 +800,15 @@ def _make_schedule(
             # Check for file existance and output generation
             for input_path in sorted(task_data.inputs):
                 reason = None
-                if input_path.is_dir():
-                    reason = 'is a folder; tickle can only track files'
-                elif not input_path.exists() and str(input_path) not in outputs:
+                if input_path in task_data.folders:
+                    if input_path.exists() and not input_path.is_dir():
+                        reason = 'is a file, not a folder'
+                    elif not input_path.exists() and not _produced(input_path):
+                        reason = ('does not exist and will not be generated '
+                            'during task graph evaluation')
+                elif input_path.is_dir():
+                    reason = 'is a folder; write it with a trailing / to read a folder'
+                elif not input_path.exists() and not _produced(input_path):
                     reason = ('does not exist and will not be generated '
                         'during task graph evaluation')
                 if reason is None: continue
@@ -624,42 +822,76 @@ def _make_schedule(
 
         # Collect the outputs tasks so far would write
         outputs.update(str(output) for output in task_data.outputs)
+        folders.update(str(output) for output in task_data.folders if output in task_data.outputs)
 
-    # Compare the input closures with those recorded when each task last
-    # succeeded; a task without a record has not succeeded since it last
-    # changed. Files whose stat matches the cache are not hashed again.
+    # Compare the input closures, with the files their depfiles named, with
+    # those recorded when each task last succeeded; a task without a record
+    # has not succeeded since it last changed. Files whose stat matches the
+    # cache are not hashed again.
+    fallback : dict[Task, str] = dict()
     hashes : dict[str, str | None] = dict()
     def _current_hash(file_path : str) -> str | None:
         if file_path not in hashes:
             hashes[file_path] = _file_hash(target_dir, cache, file_path)
         return hashes[file_path]
     for index, task in enumerate(tasks):
+        task.reason = ''
         if not task.get_active(): continue
         task_data = agenda_data[index]
+        if task_data.always:
+            task.reason = 'it runs always'
+            continue
         with cache.lock: record_data = _record(cache, task_data.hash)
         previous = record_data.get('inputs') if record_data is not None else None
         if previous is None:
             task.set_valid(False)
+            task.reason = 'it is new or changed'
             continue
         closure = {
-            _rel(target_dir, file_path) : file_path
-            for file_path in task_closures[index]
+            _key(target_dir, file_path) : file_path
+            for file_path in _full_closure(
+                target_dir, cache, task_data, task_closures[index]
+            )
         }
         if set(closure.keys()) != set(previous.keys()):
             task.set_valid(False)
+            task.reason = 'it reads other files than when it last ran'
             continue
-        for rel_path, file_path in closure.items():
-            if _current_hash(file_path) == previous[rel_path]: continue
+        for key, file_path in sorted(closure.items()):
+            if _current_hash(file_path) == previous[key]: continue
             task.set_valid(False)
+            # A generated input is better explained by the task writing it,
+            # when that one runs; see below
+            if _produced(Path(file_path.rstrip(os.sep))):
+                fallback[task] = 'its input %s changed' % key
+            else:
+                task.reason = 'its input %s changed' % key
             break
 
     # Check output files
     for index, task_data in enumerate(agenda_data):
-        if all(output.exists() for output in task_data.outputs): continue
-        tasks[index].set_valid(False)
+        for output in sorted(task_data.outputs):
+            if output.is_dir() if output in task_data.folders else output.is_file():
+                continue
+            tasks[index].set_valid(False)
+            if tasks[index].reason == '':
+                tasks[index].reason = 'its output %s is missing' % (
+                    _key(target_dir, _folder_key(output))
+                    if output in task_data.folders else
+                    _rel(target_dir, output)
+                )
+            break
 
-    # Propagate invalidity
+    # Propagate invalidity; a task out of date only because a task it reads
+    # from runs says so
     graph.propagate(tasks)
+    for task in graph.topological_order(tasks):
+        if task.get_valid() or task.reason != '': continue
+        for dep in sorted(task.get_deps(), key = lambda dep: position.get(dep, 0)):
+            if dep.get_valid(): continue
+            task.reason = 'it reads from \"%s\", which runs' % dep.description
+            break
+        if task.reason == '': task.reason = fallback.get(task, '')
     skipped = [
         agenda_data[index].description
         for index, task in enumerate(tasks)
@@ -675,6 +907,7 @@ def _make_schedule(
                 if task.get_valid() or not task.get_active(): continue
                 if wanted is not None and task not in wanted: continue
                 for output_path in agenda_data[index].outputs:
+                    if output_path in agenda_data[index].folders: continue
                     files.setdefault(_rel(target_dir, output_path), None)
             cache.store()
     return skipped
@@ -734,7 +967,9 @@ class _ProjectEvaluator(Evaluator):
         """Which running tasks may carry on under a new schedule: those whose
         input closure is what it was when they started."""
         closure_by_key = {
-            task_data.hash : task_closures[index]
+            task_data.hash : _full_closure(
+                self._target_dir, self._cache, task_data, task_closures[index]
+            )
             for index, task_data in enumerate(agenda_data)
         }
         keep : set[Run] = set()
@@ -744,7 +979,7 @@ class _ProjectEvaluator(Evaluator):
             if started is None or closure is None: continue
             try:
                 current = {
-                    _rel(self._target_dir, file_path) :
+                    _key(self._target_dir, file_path) :
                         _file_hash(self._target_dir, self._cache, file_path)
                     for file_path in closure
                 }
@@ -796,10 +1031,11 @@ class OfflineEvaluator(_ProjectEvaluator):
             # Online reload of depend
             self._watcher.subscribe(depend_path, self._event_depend)
 
-    def planned(self) -> list[str]:
+    def planned(self) -> list[tuple[str, str]]:
+        """The tasks to run, in an order they could run in, and why."""
         schedule = self.schedule()
         if schedule is None: return []
-        return [ task.description for task in schedule.order() ]
+        return [ (task.description, task.reason) for task in schedule.order() ]
 
     def _event_depend(self, event : Event):
         depend_hash = _hash(self._depend_path)
@@ -836,7 +1072,11 @@ class OfflineEvaluator(_ProjectEvaluator):
         result = Result(skipped = list(self.skipped))
         schedule = self.schedule()
         if schedule is None: return result
-        result.succeeded = [ task.description for task in schedule.with_state(DONE) ]
+        # A task found up to date when it was about to start did not run
+        result.succeeded = [
+            task.description for task in schedule.with_state(DONE)
+            if not task.cut_off
+        ]
         result.failed = [ task.description for task in schedule.with_state(FAILED) ]
         result.blocked = [
             task.description for task in schedule.tasks
@@ -923,8 +1163,13 @@ def offline(
         )
         if dry_run:
             planned = evaluator.planned()
-            for desc in planned: log.info('Would run \"%s\"' % desc)
-            return Result(skipped = list(evaluator.skipped), planned = planned)
+            for desc, reason in planned:
+                log.info('Would run \"%s\": %s' % (desc, reason))
+            return Result(
+                skipped = list(evaluator.skipped),
+                planned = [ desc for desc, _ in planned ],
+                reasons = dict(planned)
+            )
         evaluator.start()
     except RuntimeError as error:
         log.critical(str(error))
@@ -998,10 +1243,10 @@ class OnlineEvaluator(_ProjectEvaluator):
         self._request('depend')
 
     def _event_source(self,
-        source_path : Path,
+        source_key : str,
         event : Event
         ):
-        self._request('source:%s' % source_path)
+        self._request('source:%s' % source_key)
 
     def _request(self, kind : str):
         with self._pending_lock:
@@ -1048,36 +1293,41 @@ class OnlineEvaluator(_ProjectEvaluator):
                     self._depend_path.relative_to(self._target_dir)
                 ))
                 rebuild = True
-        changed : list[Path] = []
+        changed : list[str] = []
         for kind in sorted(pending):
             if not kind.startswith('source:'): continue
-            source_path = Path(kind[len('source:'):])
-            _source_path = str(source_path)
-            if _source_path in self._source_hashes:
-                try: source_hash = _hash(source_path)
+            source_key = kind[len('source:'):]
+            if source_key in self._source_hashes:
+                try: source_hash = self._source_hash(source_key)
                 except RuntimeError: continue
-                if self._source_hashes[_source_path] == source_hash: continue
-                self._source_hashes[_source_path] = source_hash
-            changed.append(source_path)
-        for source_path in changed:
+                if self._source_hashes[source_key] == source_hash: continue
+                self._source_hashes[source_key] = source_hash
+            changed.append(source_key)
+        for source_key in changed:
             log.info('%s was modified, rescheduling' % (
-                source_path.relative_to(self._target_dir)
+                _key(self._target_dir, source_key)
             ))
         if rebuild:
             self._rebuild(self._agenda_data, self._pools)
         elif len(changed) != 0:
             self._update_source()
 
+    def _source_hash(self, source_key : str) -> str | None:
+        if _is_folder_key(source_key):
+            return _tree_hash(self._target_dir, self._cache, source_key)
+        return _hash(Path(source_key))
+
     def _watch(self, current : set[str], files : set[str]):
+        # Files are watched alone, folders with everything in them
         for file_path in current.difference(files):
             self._watcher.unsubscribe(Path(file_path))
             self._source_hashes.pop(file_path, None)
         for file_path in files.difference(current):
-            _file_path = Path(file_path)
             self._watcher.subscribe(
-                _file_path, partial(self._event_source, _file_path)
+                Path(file_path), partial(self._event_source, file_path),
+                tree = _is_folder_key(file_path)
             )
-            try: self._source_hashes[file_path] = _hash(_file_path)
+            try: self._source_hashes[file_path] = self._source_hash(file_path)
             except RuntimeError: self._source_hashes[file_path] = None
 
     ###########################################################################
@@ -1093,12 +1343,20 @@ class OnlineEvaluator(_ProjectEvaluator):
         pools : dict[str, int]
         ):
         def _explicits() -> set[str]:
+            # The inputs no task writes, folders as folder keys
             inputs : set[str] = set()
             outputs : set[str] = set()
             for task_data in agenda_data:
-                inputs.update(str(input) for input in task_data.inputs)
+                inputs.update(
+                    _folder_key(input) if input in task_data.folders else str(input)
+                    for input in task_data.inputs
+                )
                 outputs.update(str(output) for output in task_data.outputs)
-            return inputs.difference(outputs)
+            def _generated(input : str) -> bool:
+                path = Path(input.rstrip(os.sep))
+                if str(path) in outputs: return True
+                return any(str(parent) in outputs for parent in path.parents)
+            return { input for input in inputs if not _generated(input) }
 
         # Build everything before changing any state, so an invalid agenda
         # or depend file leaves the current ones in place
@@ -1109,7 +1367,7 @@ class OnlineEvaluator(_ProjectEvaluator):
 
         # Commit and reschedule
         explicits = _explicits()
-        implicits = _implicits(agenda_data, task_closures)
+        implicits = _implicits(self._target_dir, self._cache, agenda_data, task_closures)
         self._watch(self._explicits, explicits)
         self._explicits = explicits
         self._watch(self._implicits, implicits.difference(explicits))

@@ -489,7 +489,7 @@ def _agenda_evaluate_offline_reorder(
 
 
 @context(evaluated_agendas, worker_counts)
-@prop('Offline evaluation reruns a task with a missing output and the tasks after it', attempts=_attempts(100))
+@prop('Offline evaluation reruns a task with a missing output, and not the tasks after it', attempts=_attempts(100))
 def _agenda_evaluate_offline_missing_output(
     agenda: ta.Agenda,
     workers: int,
@@ -501,7 +501,8 @@ def _agenda_evaluate_offline_missing_output(
     task = rng.choice(agenda.tasks)
     (test_path / _norm(task.outputs[0])).unlink()
     success, performed = _run_offline(test_path, None, workers)
-    return success and set(performed) == _dependents(agenda, task)
+    # It writes what it wrote before, so the tasks after it are cut off
+    return success and performed == [task.desc]
 
 
 @context(evaluated_agendas, worker_counts)
@@ -524,11 +525,12 @@ def _agenda_evaluate_offline_changed_task(
         # command, for every task using the proc
         agenda.procs[task.proc] = agenda.procs[task.proc] + ['-i']
         changed = [other for other in agenda.tasks if other.proc == task.proc]
+        expected = set().union(*(_dependents(agenda, other) for other in changed))
     else:
-        # An argument the command does not use
+        # An argument the command does not use: the task reruns, writes
+        # what it wrote before, and the tasks after it are cut off
         task.args['unused'] = ['changed']
-        changed = [task]
-    expected = set().union(*(_dependents(agenda, other) for other in changed))
+        expected = {task.desc}
     success, performed = _run_offline(test_path, agenda, workers)
     return success and set(performed) == expected
 
@@ -1706,19 +1708,21 @@ def _agenda_evaluate_offline_depend_generated(
     ]
     assume(len(pairs) != 0)
     task_a, task_b = rng.choice(pairs)
+    _add_trigger(agenda, task_a, 'src/a_trigger.txt')
     source = 'src/source.txt'
     task_b.inputs.append(source)
     task_b.args['inputs'] = task_b.args['inputs'] + [source]
     test_path = _fixture_path()
     (test_path / 'src').mkdir()
     (test_path / source).write_text('source')
+    (test_path / 'src' / 'a_trigger.txt').write_text('first')
     tdep.store(test_path / 'depend.yaml', {source: [task_a.outputs[0]]})
     success, performed = _run_offline(test_path, agenda, workers)
     if not success: return False
     if performed.index(task_a.desc) > performed.index(task_b.desc): return False
 
-    # A rerun of A reruns B, which reads A's output through the entry
-    task_a.args['unused'] = ['changed']
+    # A new output of A reruns B, which reads it through the entry
+    (test_path / 'src' / 'a_trigger.txt').write_text('second')
     success, performed = _run_offline(test_path, agenda, workers)
     return success and task_b.desc in performed and task_a.desc in performed
 
@@ -1740,7 +1744,7 @@ def _agenda_evaluate_offline_changed_back(
     if not success or task.desc not in performed: return False
     del task.args['unused']
     success, performed = _run_offline(test_path, agenda, workers)
-    return success and set(performed) == _dependents(agenda, task)
+    return success and performed == [task.desc]
 
 
 @context(worker_counts)
@@ -2283,7 +2287,11 @@ def _agenda_evaluate_offline_dry_run(
     if not result or len(performed) != 0: return False
     if (test_path / 'tickle.cache').read_bytes() != cache_before: return False
     success, performed = _run_offline(test_path, agenda, workers)
-    return success and sorted(performed) == sorted(result.planned)
+    # Tasks after a deleted output are planned, and then cut off when it
+    # comes out as before
+    return success and set(performed) <= set(result.planned) and (
+        len(agenda.tasks) == 0 or len(performed) >= 1
+    )
 
 
 @context(evaluated_agendas, worker_counts)
@@ -2504,6 +2512,229 @@ def _watcher_reanchors(how: str) -> bool:
 
 
 ###############################################################################
+# Folders, early cutoff, depfiles and explanations
+###############################################################################
+# Writes one file per frame into a folder: argv is the folder, the frame
+# count, and a word mixed into every frame
+_FRAMES = (
+    'import sys, pathlib\n'
+    'folder = pathlib.Path(sys.argv[1]); folder.mkdir(parents = True, exist_ok = True)\n'
+    'for i in range(int(sys.argv[2])): (folder / ("%04d.txt" % i)).write_text("%s %d" % (sys.argv[3], i))'
+)
+# Concatenates the files of a folder, in name order, into a file
+_JOIN = (
+    'import sys, pathlib\n'
+    'folder = pathlib.Path(sys.argv[1])\n'
+    'parts = [p.read_text() for p in sorted(folder.rglob("*")) if p.is_file()]\n'
+    'pathlib.Path(sys.argv[2]).write_text("|".join(parts))'
+)
+
+
+def _frames_agenda(count: int, word: str, source: bool) -> ta.Agenda:
+    """Frames rendered into a folder and joined into one file; or with a
+    source folder, joined from that folder."""
+    agenda = ta.Agenda(procs = {
+        'frames': [sys.executable, '-c', _FRAMES, '$folder', '$count', '$word'],
+        'join': [sys.executable, '-c', _JOIN, '$folder', '$output']
+    })
+    folder = 'src/frames/' if source else 'out/frames/'
+    if not source:
+        agenda.tasks.append(ta.Task(
+            desc = 'Task frames', proc = 'frames',
+            args = {'folder': ['out/frames'], 'count': [str(count)], 'word': [word]},
+            outputs = [folder]
+        ))
+    agenda.tasks.append(ta.Task(
+        desc = 'Task join', proc = 'join',
+        args = {'folder': [folder.rstrip('/')], 'output': ['out/joined.txt']},
+        inputs = [folder], outputs = ['out/joined.txt']
+    ))
+    return agenda
+
+
+@context(g.int_range(1, 4), worker_counts)
+@prop('A folder written by one task is read by another, and a changed file in it reruns the reader', attempts=_attempts(5))
+def _agenda_evaluate_offline_folder_output(count: int, workers: int) -> bool:
+    test_path = _fixture_path()
+    agenda = _frames_agenda(count, 'first', False)
+    success, performed = _run_offline(test_path, agenda, workers)
+    if not success or performed != ['Task frames', 'Task join']: return False
+    joined = test_path / 'out' / 'joined.txt'
+    if joined.read_text() != '|'.join('first %d' % i for i in range(count)): return False
+    success, performed = _run_offline(test_path, agenda, workers)
+    if not success or performed != []: return False
+
+    # Fewer frames: the frames the last run wrote, and that nobody changed,
+    # are removed before the task runs again, so none is left stale
+    agenda = _frames_agenda(count - 1 if count > 1 else 1, 'second', False)
+    success, performed = _run_offline(test_path, agenda, workers)
+    frames = sorted(p.name for p in (test_path / 'out' / 'frames').iterdir())
+    expected = max(count - 1, 1)
+    if not success or performed != ['Task frames', 'Task join']: return False
+    if frames != ['%04d.txt' % i for i in range(expected)]: return False
+    if not _clean(test_path): return False
+    return not (test_path / 'out').exists()
+
+
+@context(g.int_range(1, 4), worker_counts, g.one_of(['edit', 'add', 'remove']))
+@prop('A task reading a source folder reruns when a file in it changes, appears or goes', attempts=_attempts(10))
+def _agenda_evaluate_offline_folder_input(count: int, workers: int, change: str) -> bool:
+    test_path = _fixture_path()
+    folder = test_path / 'src' / 'frames'
+    folder.mkdir(parents = True)
+    for i in range(count): (folder / ('%04d.txt' % i)).write_text('frame %d' % i)
+    agenda = _frames_agenda(count, '', True)
+    if not _run_offline(test_path, agenda, workers)[0]: return False
+    success, performed = _run_offline(test_path, agenda, workers)
+    if not success or performed != []: return False
+    if change == 'edit': (folder / '0000.txt').write_text('edited')
+    elif change == 'add': (folder / 'sub').mkdir(); (folder / 'sub' / 'extra.txt').write_text('extra')
+    else: (folder / '0000.txt').unlink()
+    success, performed = _run_offline(test_path, agenda, workers)
+    return success and performed == ['Task join'] and (folder / '..').exists()
+
+
+@context(evaluated_agendas, worker_counts)
+@prop('A task that reruns and writes what it wrote before does not rerun the tasks after it', attempts=_attempts(50))
+def _agenda_evaluate_offline_cutoff(
+    agenda: ta.Agenda,
+    workers: int,
+    rng: random.Random
+) -> bool:
+    assume(len(agenda.tasks) != 0)
+    test_path = _fixture_path()
+    if not _run_offline(test_path, agenda, workers)[0]: return False
+    task = rng.choice(agenda.tasks)
+    if rng.choice([True, False]):
+        # An argument the command does not use: the task is new to tickle
+        task.args['unused'] = ['changed']
+    else:
+        (test_path / _norm(task.outputs[0])).unlink()
+    result, performed, _ = _offline_result(test_path, agenda, workers)
+    return bool(result) and performed == [task.desc]
+
+
+@context(g.lists(g.lists(g.strings())))
+@prop('Depfiles in make syntax give back the prerequisites they name')
+def _depfile_parse(rules: list[list[str]]) -> bool:
+    import tickle.depfile as tdepfile
+    # Names without line breaks, tabs or backslashes, escaped as compilers
+    # do: a backslash before a space, $$ for $, and lines continued
+    def _clean_name(name: str) -> str:
+        return ''.join(c for c in name if c.isprintable() and c not in '\\\t#:') or 'x'
+    expected: list[str] = []
+    text = ''
+    for index, rule in enumerate(rules):
+        names = [_clean_name(name) for name in rule]
+        escaped = [name.replace('$', '$$').replace(' ', '\\ ') for name in names]
+        text += 'target_%d.o: %s\n' % (index, ' \\\n  '.join(escaped))
+        for name in names:
+            if name not in expected: expected.append(name)
+    return tdepfile.parse(text) == expected
+
+
+@context(worker_counts)
+@prop('Online mode reruns a task reading a folder when a file appears in it, also in a new subfolder', attempts=_attempts(5))
+def _agenda_evaluate_online_folder(workers: int) -> bool:
+    test_path = _fixture_path()
+    folder = test_path / 'src' / 'frames'
+    folder.mkdir(parents = True)
+    (folder / '0000.txt').write_text('frame 0')
+    agenda_path = test_path / 'agenda.yaml'
+    ta.store(agenda_path, _frames_agenda(1, '', True))
+    joined = test_path / 'out' / 'joined.txt'
+    with _quiet():
+        evaluator = tapi.online(test_path, agenda_path, worker_count = workers)
+        if evaluator is None: return False
+        runner = Thread(target = evaluator.start, daemon = True)
+        runner.start()
+        try:
+            if not _wait_for(lambda: joined.exists() and joined.read_text() == 'frame 0'): return False
+            (folder / 'later').mkdir()
+            (folder / 'later' / '0001.txt').write_text('frame 1')
+            ok = _wait_for(lambda: joined.read_text() == 'frame 0|frame 1')
+        finally:
+            evaluator.stop()
+            runner.join(timeout = 10)
+    return ok and not runner.is_alive()
+
+
+_DEPFILE_COMPILER = (
+    'import sys, pathlib\n'
+    'source, output, depfile = sys.argv[1:4]\n'
+    'headers = [line.split()[1] for line in pathlib.Path(source).read_text().splitlines() if line.startswith("include ")]\n'
+    'text = pathlib.Path(source).read_text() + "".join(pathlib.Path(h).read_text() for h in headers)\n'
+    'pathlib.Path(output).write_text(text)\n'
+    'pathlib.Path(depfile).write_text("%s: %s %s\\n" % (output, source, " ".join(h.replace(" ", "\\\\ ") for h in headers)))'
+)
+
+
+@context(worker_counts)
+@prop('A task with a depfile reruns when a file its depfile names changes, and only then', attempts=_attempts(5))
+def _agenda_evaluate_offline_depfile(workers: int) -> bool:
+    test_path = _fixture_path()
+    (test_path / 'src').mkdir()
+    (test_path / 'src' / 'a header.h').write_text('header one\n')
+    (test_path / 'src' / 'other.h').write_text('other\n')
+    (test_path / 'src' / 'main.c').write_text('main\ninclude src/other.h\n')
+    agenda = ta.Agenda(procs = {
+        'compile': [sys.executable, '-c', _DEPFILE_COMPILER, '$source', '$output', '$depfile']
+    }, tasks = [ta.Task(
+        desc = 'Task compile', proc = 'compile',
+        args = {'source': ['src/main.c'], 'output': ['out/main.o'], 'depfile': ['out/main.d']},
+        inputs = ['src/main.c'], outputs = ['out/main.o'], depfile = 'out/main.d'
+    )])
+    (test_path / 'out').mkdir()
+    if not _run_offline(test_path, agenda, workers, processes = True)[0]: return False
+    success, performed = _run_offline(test_path, agenda, workers, processes = True)
+    if not success or performed != []: return False
+
+    # A header the depfile does not name changes nothing; one it names
+    # reruns the task
+    (test_path / 'src' / 'a header.h').write_text('header two\n')
+    success, performed = _run_offline(test_path, agenda, workers, processes = True)
+    if not success or performed != []: return False
+    (test_path / 'src' / 'other.h').write_text('other changed\n')
+    success, performed = _run_offline(test_path, agenda, workers, processes = True)
+    if not success or performed != ['Task compile']: return False
+    if (test_path / 'out' / 'main.o').read_text() != 'main\ninclude src/other.h\nother changed\n':
+        return False
+
+    # Once the source stops including it, the header no longer counts
+    (test_path / 'src' / 'main.c').write_text('main\n')
+    if not _run_offline(test_path, agenda, workers, processes = True)[0]: return False
+    (test_path / 'src' / 'other.h').write_text('other changed again\n')
+    success, performed = _run_offline(test_path, agenda, workers, processes = True)
+    return success and performed == []
+
+
+@context(evaluated_agendas, worker_counts)
+@prop('A dry run says why each task would run', attempts=_attempts(30))
+def _agenda_evaluate_offline_explain(
+    agenda: ta.Agenda,
+    workers: int,
+    rng: random.Random
+) -> bool:
+    assume(len(agenda.tasks) != 0)
+    test_path = _fixture_path()
+    result, _, printed = _offline_result(test_path, agenda, workers, dry_run = True)
+    if any(result.reasons.get(task.desc) != 'it is new or changed' for task in agenda.tasks):
+        return False
+    if not _run_offline(test_path, agenda, workers)[0]: return False
+    task = rng.choice(agenda.tasks)
+    output = _norm(task.outputs[0])
+    (test_path / output).unlink()
+    result, _, printed = _offline_result(test_path, agenda, workers, dry_run = True)
+    if result.reasons.get(task.desc) != 'its output %s is missing' % output: return False
+    others = _dependents(agenda, task) - {task.desc}
+    return (
+        set(result.planned) == others | {task.desc}
+        and all(result.reasons[desc].startswith('it reads from') for desc in others)
+        and ('Would run "%s": its output %s is missing' % (task.desc, output)) in printed
+    )
+
+
+###############################################################################
 # Specification
 ###############################################################################
 spec = conj(
@@ -2581,4 +2812,11 @@ spec = conj(
     _agenda_evaluate_offline_task_log,
     _agenda_evaluate_online_adopts,
     _watcher_reanchors,
+    _agenda_evaluate_offline_folder_output,
+    _agenda_evaluate_offline_folder_input,
+    _agenda_evaluate_online_folder,
+    _agenda_evaluate_offline_cutoff,
+    _agenda_evaluate_offline_depfile,
+    _depfile_parse,
+    _agenda_evaluate_offline_explain,
 )

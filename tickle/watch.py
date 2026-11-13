@@ -34,91 +34,118 @@ def _nearest_existing(dir_path : Path) -> Path:
 ###############################################################################
 # Classes
 ###############################################################################
+# A watch is of a folder, alone or with everything below it
+Watch = tuple[Path, bool]
+
+class _Subscription:
+    __slots__ = ('callback', 'tree', 'watch')
+
+    def __init__(self, callback : EventHandler, tree : bool, watch : Watch):
+        self.callback = callback
+        self.tree = tree
+        self.watch = watch
+
 class FileWatcher(FileSystemEventHandler):
-    """Calls a callback when a subscribed file changes. Watches each file's
-    folder; while that folder does not exist, it watches the nearest folder
-    above it that does, and moves down as the missing folders appear, and
-    up again when they go away. A watched folder that is replaced, deleted
-    and created again or renamed over, is watched again, since the old
-    watch may follow the folder that went away."""
+    """Calls a callback when a subscribed file changes, or for a subscribed
+    tree, when anything in a folder changes, at any depth. Watches each
+    file's folder, or a tree's folder with everything below it; while that
+    folder does not exist, it watches the nearest folder above it that
+    does, and moves down as the missing folders appear, and up again when
+    they go away. A watched folder that is replaced, deleted and created
+    again or renamed over, is watched again, since the old watch may follow
+    the folder that went away."""
 
     def __init__(self):
         super().__init__()
         self._lock = RLock()
         self._observer = Observer()
-        self._callbacks : dict[Path, EventHandler] = {}
-        self._watched : dict[Path, Path] = {}
-        self._watch_objs : dict[Path, ObservedWatch] = {}
-        self._watch_count : dict[Path, int] = {}
+        self._subscriptions : dict[Path, _Subscription] = {}
+        self._watch_objs : dict[Watch, ObservedWatch] = {}
+        self._watch_count : dict[Watch, int] = {}
 
-    def _watch(self, dir_path : Path):
-        if dir_path in self._watch_count:
-            self._watch_count[dir_path] += 1
+    def _watch(self, watch : Watch):
+        if watch in self._watch_count:
+            self._watch_count[watch] += 1
             return
-        self._watch_objs[dir_path] = self._observer.schedule(self, str(dir_path))
-        self._watch_count[dir_path] = 1
+        dir_path, recursive = watch
+        self._watch_objs[watch] = self._observer.schedule(
+            self, str(dir_path), recursive = recursive
+        )
+        self._watch_count[watch] = 1
 
-    def _unwatch(self, dir_path : Path):
-        self._watch_count[dir_path] -= 1
-        if self._watch_count[dir_path] != 0: return
+    def _unwatch(self, watch : Watch):
+        self._watch_count[watch] -= 1
+        if self._watch_count[watch] != 0: return
         # The watch of a folder that was deleted may be gone already
-        try: self._observer.unschedule(self._watch_objs[dir_path])
+        try: self._observer.unschedule(self._watch_objs[watch])
         except Exception: pass
-        del self._watch_objs[dir_path]
-        del self._watch_count[dir_path]
+        del self._watch_objs[watch]
+        del self._watch_count[watch]
 
-    def subscribe(self, file_path : Path, callback : EventHandler):
-        _file_path = file_path.resolve()
+    def _anchor(self, path : Path, tree : bool) -> Watch:
+        # A file is watched through its folder; a tree through its own
+        # folder, recursively, or while that is missing, the nearest above
+        if tree:
+            nearest = _nearest_existing(path)
+            return nearest, True
+        return _nearest_existing(path.parent), False
+
+    def subscribe(self, path : Path, callback : EventHandler, tree : bool = False):
+        _path = path.resolve()
         with self._lock:
-            if _file_path in self._callbacks: return
-            self._callbacks[_file_path] = callback
-            dir_path = _nearest_existing(_file_path.parent)
-            self._watched[_file_path] = dir_path
-            self._watch(dir_path)
+            if _path in self._subscriptions: return
+            watch = self._anchor(_path, tree)
+            self._subscriptions[_path] = _Subscription(callback, tree, watch)
+            self._watch(watch)
 
-    def unsubscribe(self, file_path : Path):
-        _file_path = file_path.resolve()
+    def unsubscribe(self, path : Path):
+        _path = path.resolve()
         with self._lock:
-            if _file_path not in self._callbacks: return
-            del self._callbacks[_file_path]
-            self._unwatch(self._watched.pop(_file_path))
+            subscription = self._subscriptions.pop(_path, None)
+            if subscription is None: return
+            self._unwatch(subscription.watch)
 
-    def _refresh(self, dir_path : Path):
+    def _refresh(self, watch : Watch):
         # Watch a folder again, in case its watch followed a folder that
         # was deleted or renamed away
-        watch = self._watch_objs.get(dir_path)
-        if watch is None: return
-        try: self._observer.unschedule(watch)
+        old = self._watch_objs.get(watch)
+        if old is None: return
+        try: self._observer.unschedule(old)
         except Exception: pass
-        try: self._watch_objs[dir_path] = self._observer.schedule(self, str(dir_path))
+        dir_path, recursive = watch
+        try:
+            self._watch_objs[watch] = self._observer.schedule(
+                self, str(dir_path), recursive = recursive
+            )
         except Exception as error:
             log.debug('FileWatcher: could not watch %s again: %s' % (dir_path, error))
 
     def _reanchor(self, paths : list[Path]) -> list[tuple[EventHandler, Event]]:
-        # Move each file's watch to the nearest folder that exists now, down
-        # as folders appear and up as they go away, and watch again a folder
-        # that a directory event touched. A file may have changed while it
-        # was not watched, so report the files that exist; their callbacks
-        # judge by content.
+        # Move each watch to the nearest folder that exists now, down as
+        # folders appear and up as they go away, and watch again a folder
+        # that a directory event touched. Something may have changed while
+        # it was not watched, so report what exists; callbacks judge by
+        # content.
         result : list[tuple[EventHandler, Event]] = []
         with self._lock:
-            refreshed : set[Path] = set()
-            for file_path, dir_path in list(self._watched.items()):
-                nearest = _nearest_existing(file_path.parent)
+            refreshed : set[Watch] = set()
+            for path, subscription in list(self._subscriptions.items()):
+                watch = self._anchor(path, subscription.tree)
+                dir_path = subscription.watch[0]
                 touched = any(
-                    path == dir_path or path in dir_path.parents
-                    for path in paths
+                    event_path == dir_path or event_path in dir_path.parents
+                    for event_path in paths
                 )
-                if nearest == dir_path and not touched: continue
-                if nearest != dir_path:
-                    self._watch(nearest)
-                    self._unwatch(dir_path)
-                    self._watched[file_path] = nearest
-                elif nearest not in refreshed:
-                    refreshed.add(nearest)
-                    self._refresh(nearest)
-                if file_path.exists():
-                    result.append((self._callbacks[file_path], Event.Created))
+                if watch == subscription.watch and not touched: continue
+                if watch != subscription.watch:
+                    self._watch(watch)
+                    self._unwatch(subscription.watch)
+                    subscription.watch = watch
+                elif watch not in refreshed:
+                    refreshed.add(watch)
+                    self._refresh(watch)
+                if path.exists():
+                    result.append((subscription.callback, Event.Created))
         return result
 
     def start(self):
@@ -128,9 +155,17 @@ class FileWatcher(FileSystemEventHandler):
         self._observer.stop()
         self._observer.join()
 
-    def _callback(self, path : str | None) -> EventHandler | None:
-        if not path: return None
-        with self._lock: return self._callbacks.get(Path(path))
+    def _callbacks_for(self, path : Path) -> list[EventHandler]:
+        # The file's own subscription, and those of trees holding it
+        with self._lock:
+            result : list[EventHandler] = []
+            subscription = self._subscriptions.get(path)
+            if subscription is not None: result.append(subscription.callback)
+            for parent in path.parents:
+                subscription = self._subscriptions.get(parent)
+                if subscription is not None and subscription.tree:
+                    result.append(subscription.callback)
+            return result
 
     def on_any_event(self, event : FileSystemEvent):
         kind = {
@@ -141,22 +176,25 @@ class FileWatcher(FileSystemEventHandler):
         }.get(event.event_type)
         if kind is None: return
         calls : list[tuple[EventHandler, Event]] = []
+        paths = [
+            Path(str(path))
+            for path in (event.src_path, getattr(event, 'dest_path', ''))
+            if path
+        ]
         if event.is_directory:
-            calls = self._reanchor([
-                Path(str(path))
-                for path in (event.src_path, getattr(event, 'dest_path', ''))
-                if path
-            ])
-        else:
-            # A move reports the old path as the source and the new one as
-            # the destination; saving by renaming a new file over the
-            # watched one shows up only as such a move on some platforms.
-            for path in (event.src_path, getattr(event, 'dest_path', '')):
-                callback = self._callback(str(path) if path else None)
-                if callback is None: continue
+            calls = self._reanchor(paths)
+        # A move reports the old path as the source and the new one as the
+        # destination; saving by renaming a new file over the watched one
+        # shows up only as such a move on some platforms. A tree hears of
+        # everything below it, folders included.
+        for path in paths:
+            for callback in self._callbacks_for(path):
                 log.debug('FileWatcher: %s %s' % (kind.value, path))
                 calls.append((callback, kind))
+        seen : list[EventHandler] = []
         for callback, callback_kind in calls:
+            if any(callback is other for other in seen): continue
+            seen.append(callback)
             # A failing callback must not stop the observer thread, which
             # would end all watching
             try: callback(callback_kind)

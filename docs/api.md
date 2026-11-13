@@ -42,6 +42,7 @@ class Result:
     skipped: list[str]     # could not run: an input is missing and no task makes it, or no outputs
     blocked: list[str]     # did not run because a task failed
     planned: list[str]     # a dry run's tasks
+    reasons: dict[str, str]  # a dry run's reason for each planned task, such as 'its output out/x is missing'
     error: str | None      # why the run could not start: no agenda, an invalid agenda or depend file, the lock is held, ...
 ```
 
@@ -88,8 +89,9 @@ class Task:
     proc: str                     # name of a proc in Agenda.procs
     flows: list[str] = []         # flows the task belongs to
     args: dict[str, list[str]] = {}  # values for the proc's $parameters
-    inputs: list[str] = []        # paths relative to the agenda file
+    inputs: list[str] = []        # paths relative to the agenda file; a trailing / names a folder
     outputs: list[str] = []
+    depfile: str = ''             # a make-syntax depfile the task writes, naming more inputs
     pool: str = ''                # a pool in Agenda.pools, or '' for none
     timeout: float = 0.0          # seconds before the task is stopped and fails; 0 for none
     retries: int = 0              # how often a failing task runs again
@@ -107,7 +109,7 @@ store(agenda_path: Path, agenda_data: Agenda) -> None
 compile(target_dir: Path, agenda_data: Agenda) -> list[CompiledTask]
 ```
 
-(The defaults are dataclass fields; the lists and dicts are new for each object.) `store` leaves `pool`, `timeout`, `retries`, `always` and `pools` out of the file while they hold their defaults.
+(The defaults are dataclass fields; the lists and dicts are new for each object.) `store` leaves `depfile`, `pool`, `timeout`, `retries`, `always` and `pools` out of the file while they hold their defaults.
 
 `load` raises `RuntimeError` for a file that cannot be read, malformed YAML, or data that does not fit the types above; the message says where, as in `tasks[2].inputs: ...` (`tickle.depend.load` likewise).
 

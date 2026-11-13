@@ -25,6 +25,8 @@ class Task:
     args: dict[str, list[str]] = field(default_factory = dict)
     inputs: list[str] = field(default_factory = list)
     outputs: list[str] = field(default_factory = list)
+    # A depfile in make syntax that the task writes, naming more inputs
+    depfile: str = field(default = '', metadata = _NEW)
     # Name of a pool in Agenda.pools limiting how many of its tasks run at
     # once; '' for none
     pool: str = field(default = '', metadata = _NEW)
@@ -51,6 +53,9 @@ class CompiledTask:
     command: list[str]
     inputs: set[Path]
     outputs: set[Path]
+    # The inputs and outputs written with a trailing /, which name folders
+    folders: set[Path] = field(default_factory = set)
+    depfile: Path | None = None
     pool: str = ''
     timeout: float = 0.0
     retries: int = 0
@@ -61,6 +66,10 @@ CompiledAgenda = list[CompiledTask]
 ###############################################################################
 # Functions
 ###############################################################################
+def is_folder(path : str) -> bool:
+    """Whether an agenda path names a folder: it ends with a separator."""
+    return path.endswith('/') or path.endswith(os.sep)
+
 def resolve_path(base_dir : Path, rel_path : str) -> Path:
     """An agenda or depend path made absolute against base_dir, without
     redundant separators or . and .. parts, so every way of writing a path
@@ -119,22 +128,28 @@ def compile(target_dir : Path, agenda_data : Agenda) -> CompiledAgenda:
 
     def _hash_path(path : str) -> str:
         # Relative to the agenda's folder, with / separators, so a path
-        # written absolute or relative, and on any system, hashes the same
+        # written absolute or relative, and on any system, hashes the same;
+        # a folder keeps its trailing /, so it is not the file of that name
         absolute = resolve_path(target_dir, path)
-        try: return Path(os.path.relpath(absolute, target_dir)).as_posix()
-        except ValueError: return absolute.as_posix() # another drive
+        try: result = Path(os.path.relpath(absolute, target_dir)).as_posix()
+        except ValueError: result = absolute.as_posix() # another drive
+        return result + '/' if is_folder(path) else result
 
     def _task_hash(task_data : Task, command : list[str]) -> str:
         # The command is hashed rather than the proc's name, so editing a
         # proc's definition changes the tasks that use it. Flows only order
         # tasks and change no output, so they are left out, and paths are
         # normalised, so writing one differently changes nothing either.
-        data = json.dumps({
+        identity = {
             'command': command,
             'args': task_data.args,
             'inputs': sorted({ _hash_path(path) for path in task_data.inputs }),
             'outputs': sorted({ _hash_path(path) for path in task_data.outputs })
-        }, sort_keys = True)
+        }
+        # Only when set, so tasks without one keep the hash they had
+        if task_data.depfile != '':
+            identity['depfile'] = _hash_path(task_data.depfile)
+        data = json.dumps(identity, sort_keys = True)
         return hashlib.md5(data.encode('utf-8')).hexdigest()
 
     # Compile procs
@@ -194,6 +209,13 @@ def compile(target_dir : Path, agenda_data : Agenda) -> CompiledAgenda:
             raise RuntimeError('Negative timeout for task \"%s\"' % task_data.desc)
         if task_data.retries < 0:
             raise RuntimeError('Negative retries for task \"%s\"' % task_data.desc)
+        for path in task_data.inputs + task_data.outputs:
+            if not is_folder(path) or resolve_path(target_dir, path) != target_dir: continue
+            raise RuntimeError(
+                'Task \"%s\" can not read or write the whole agenda folder' % (
+                    task_data.desc
+                )
+            )
         if task_data.always and len(task_data.outputs) != 0:
             raise RuntimeError(
                 'Task \"%s\" runs always, so it can not have outputs' % (
@@ -232,6 +254,15 @@ def compile(target_dir : Path, agenda_data : Agenda) -> CompiledAgenda:
                 resolve_path(target_dir, output)
                 for output in set(task_data.outputs)
             },
+            folders = {
+                resolve_path(target_dir, path)
+                for path in task_data.inputs + task_data.outputs
+                if is_folder(path)
+            },
+            depfile = (
+                resolve_path(target_dir, task_data.depfile)
+                if task_data.depfile != '' else None
+            ),
             pool = task_data.pool,
             timeout = float(task_data.timeout),
             retries = task_data.retries,

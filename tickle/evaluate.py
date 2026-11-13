@@ -85,6 +85,10 @@ class Task:
         self._pool = pool
         self._retries = retries
         self._weight = weight
+        # Why the task is to run, for a dry run
+        self.reason : str = ''
+        # Whether its work found it up to date after all and did nothing
+        self.cut_off : bool = False
 
     def __hash__(self):
         return hash(id(self))
@@ -267,6 +271,7 @@ class Evaluator:
             state = None
             with self._condition:
                 owner, owned = self._running.pop(run)
+                if error is None and run.info.get('cutoff'): owned.cut_off = True
                 if owner is not None and run.cancelled():
                     owner.cancel(owned)
                 elif owner is not None:

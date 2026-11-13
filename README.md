@@ -105,7 +105,7 @@ Tasks run in a process group of their own, so stopping a task, at a timeout or a
 
 Without `--keep-going`, nothing more starts after a task fails; the tasks already running finish and are recorded. With it, every task that does not read from the failed task, directly or through other tasks, still runs; a stage counts a failed task as finished, so the later stages of its flows go on.
 
-Give targets after the mode, as task descriptions or output files, to run only them and the tasks they need: `tickle offline out/final.mp4`. `--dry-run` prints the tasks that would run, in an order they could run in, without running them.
+Give targets after the mode, as task descriptions or output files, to run only them and the tasks they need: `tickle offline out/final.mp4`. `--dry-run` prints the tasks that would run, in an order they could run in, and why each would run (new or changed, an input changed, an output is missing, or it reads from a task that runs), without running them. A task that only reads from tasks that run may still be left alone, if they write what they wrote before.
 
 While evaluating, tickle prints each task as it starts; the lines are flushed at once, so they also appear as they happen when the output goes to a pipe or a file. Each task's output, stdout and stderr together, goes to a log file of its own in `tickle-logs` (set with `--log-dir`), replaced each time the task runs. When a task fails, the end of its output and the path of its log are printed as soon as it fails. A task that succeeds without writing all of its outputs is reported.
 
@@ -229,6 +229,7 @@ tasks:
       - <file path 1>
       - <file path 2>
       ...
+    depfile: <file path>
     pool: <pool name>
     timeout: <seconds>
     retries: <count>
@@ -262,6 +263,10 @@ An arg is a list of string values to be inserted into the proc's command; each v
 The input and output files that the task ranges over are set with the inputs and outputs fields; paths are relative to the agenda file's folder.
 A task in no flow is ordered by its inputs alone.
 
+A path that ends with `/` names a folder. A task may read a folder, such as a folder of frames, and is then rerun when any file in it, at any depth, changes, appears or goes. A task may write a folder: tickle creates it before the task runs, records the files the task left in it, and before the task runs again removes the files it recorded there that nobody has changed since, so no stale file of an earlier run is left behind. A task that reads a file inside another task's output folder runs after that task, and no task may write a path inside another task's output folder.
+
+A task with a depfile, such as the `.d` file `gcc -MD` writes, has the files that depfile names added to its inputs once the task has succeeded: changing one of them reruns the task. The depfile is read in the make syntax compilers write, relative to the target directory. Files named only in a depfile do not order tasks; declare a generated header as an input, or in the depend file, so its task runs first.
+
 The pools section limits how many tasks of a kind run at once, below the worker count, such as one task at a time on the GPU or two large encodes: a task names its pool with the pool field.
 A task with a timeout is stopped and fails when it runs longer than that many seconds.
 A task with retries runs again when it fails, up to that many times, before it counts as failed; use it for tasks that fail now and then for reasons outside them, such as a network share.
@@ -272,7 +277,9 @@ A task is rerun when:
 - it changed, i.e. its proc's command, its args, inputs or outputs differ from when it last succeeded (its flows do not count);
 - the content of an input, or of a file an input depends on through the depend file, differs from when the task last succeeded;
 - one of its outputs is missing;
-- a task it depends on is rerun.
+- a task it depends on reran and wrote something different.
+
+When a task reruns and writes exactly what it wrote before, the tasks after it are left alone; this is checked when each of them is about to start.
 
 A task records its inputs only when it succeeds, so a task that failed or was interrupted runs again on the next run, even if nothing changed in between.
 
