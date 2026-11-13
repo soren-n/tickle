@@ -30,6 +30,21 @@ def main():
             print(__version__)
             return 0
 
+        # The files tickle reads and writes must lie in the current
+        # directory, and the ones it writes need a folder to go in
+        for name, value in [
+            ('agenda', args.agenda), ('depend', args.depend),
+            ('cache', args.cache), ('log', args.log)
+        ]:
+            file_path = Path(cwd, value)
+            if not file_path.resolve().is_relative_to(cwd.resolve()):
+                parser.error('the %s file %s is not inside the current '
+                    'directory %s' % (name, value, cwd))
+            if name in ['cache', 'log'] and not file_path.parent.is_dir():
+                parser.error('the folder of the %s file %s does not exist' % (
+                    name, value
+                ))
+
         # Handle logging
         logging.basicConfig(
             filename = Path(cwd, args.log),

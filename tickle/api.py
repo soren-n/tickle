@@ -235,8 +235,11 @@ def _eval_cmd(
 
     # Evaluate task command
     try:
+        # Tasks get no stdin: one waiting for input would hang the run, and
+        # tasks running at the same time would compete for the terminal
         result = subprocess.run(
             task_data.command,
+            stdin = subprocess.DEVNULL,
             capture_output = True,
             text = True,
             errors = 'replace',

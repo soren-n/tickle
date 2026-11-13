@@ -4,7 +4,7 @@ from pathlib import Path
 import yaml
 
 # Internal module dependencies
-from .agenda import YamlLoader
+from .agenda import YamlLoader, resolve_path
 from . import dataspec
 
 ###############################################################################
@@ -41,8 +41,8 @@ def store(depend_path : Path, depend_data : Depend):
 
 def compile(target_dir : Path, depend_data : Depend) -> CompiledDepend:
     return {
-        Path(target_dir, src_path) : {
-            Path(target_dir, dst_path)
+        resolve_path(target_dir, src_path) : {
+            resolve_path(target_dir, dst_path)
             for dst_path in set(dst_paths)
         }
         for src_path, dst_paths in depend_data.items()

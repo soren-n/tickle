@@ -5,6 +5,7 @@ from pathlib import Path
 import hashlib
 import json
 import yaml
+import os
 
 # Internal module dependencies
 from . import dataspec
@@ -41,6 +42,12 @@ CompiledAgenda = List[CompiledTask]
 ###############################################################################
 # Functions
 ###############################################################################
+def resolve_path(base_dir : Path, rel_path : str) -> Path:
+    """An agenda or depend path made absolute against base_dir, without
+    redundant separators or . and .. parts, so every way of writing a path
+    names the same file."""
+    return Path(os.path.normpath(os.path.join(base_dir, rel_path)))
+
 # The C parser is much faster on large agendas, when PyYAML was built with it
 YamlLoader = getattr(yaml, 'CSafeLoader', yaml.SafeLoader)
 
@@ -93,13 +100,14 @@ def compile(target_dir : Path, agenda_data : Agenda) -> CompiledAgenda:
 
     def _task_hash(task_data : Task, command : List[str]) -> str:
         # The command is hashed rather than the proc's name, so editing a
-        # proc's definition changes the tasks that use it.
+        # proc's definition changes the tasks that use it. Flows only order
+        # tasks and change no output, so they are left out, and paths are
+        # normalised, so writing one differently changes nothing either.
         data = json.dumps({
             'command': command,
             'args': task_data.args,
-            'flows': list(sorted(task_data.flows)),
-            'inputs': list(sorted(task_data.inputs)),
-            'outputs': list(sorted(task_data.outputs))
+            'inputs': sorted({ os.path.normpath(path) for path in task_data.inputs }),
+            'outputs': sorted({ os.path.normpath(path) for path in task_data.outputs })
         }, sort_keys = True)
         return hashlib.md5(data.encode('utf-8')).hexdigest()
 
@@ -112,6 +120,8 @@ def compile(target_dir : Path, agenda_data : Agenda) -> CompiledAgenda:
     # Flow and stage to proc mapping
     flow_proc_stage : Dict[str, Dict[str, int]] = {}
     for flow in agenda_data.flows:
+        if flow == '':
+            raise RuntimeError('A flow must have a name; found a flow named ""')
         if flow not in flow_proc_stage: flow_proc_stage[flow] = dict()
         for index, stage in enumerate(agenda_data.flows[flow]):
             for proc in stage:
@@ -166,11 +176,11 @@ def compile(target_dir : Path, agenda_data : Agenda) -> CompiledAgenda:
             },
             command = command,
             inputs = {
-                Path(target_dir, input)
+                resolve_path(target_dir, input)
                 for input in set(task_data.inputs)
             },
             outputs = {
-                Path(target_dir, output)
+                resolve_path(target_dir, output)
                 for output in set(task_data.outputs)
             }
         ))
