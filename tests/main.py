@@ -2626,10 +2626,11 @@ def _watcher_folder_gone(how: str) -> bool:
 
 @prop('A folder reported as modified keeps its watch unless another folder took its place', attempts=_attempts(5))
 def _watcher_keeps_modified_folder() -> bool:
-    """Windows reports a folder as modified whenever a file in it changes;
+    """A folder is reported as modified whenever a file in it changes;
     watching the folder again each time could lose the events of the old
     watch, such as that file's deletion. A folder replaced by another must
-    still be watched again."""
+    still be watched again, and so must a folder whose parent is reported
+    as modified, which may be the folder being created again."""
     import tickle.watch as twatch
     from watchdog.events import DirModifiedEvent
     test_path = _fixture_path()
@@ -2664,6 +2665,11 @@ def _watcher_keeps_modified_folder() -> bool:
         shutil.rmtree(folder)
         os.rename(other, folder)
         watcher.on_any_event(DirModifiedEvent(str(folder)))
+        if scheduled != [str(folder)]: return False
+
+        # A modification above the folder may be it being created again
+        scheduled.clear()
+        watcher.on_any_event(DirModifiedEvent(str(test_path)))
         return scheduled == [str(folder)]
     finally:
         watcher.stop()

@@ -90,13 +90,18 @@ class FileWatcher(FileSystemEventHandler):
             self, str(dir_path), recursive = recursive
         )
 
-    def _replaced(self, watch : Watch, kind : Event) -> bool:
-        # Whether a folder event may have replaced the watched folder. Some
-        # platforms (Windows) report a folder as modified whenever a file in
-        # it changes; watching it again each time could lose the events of
-        # the old watch, such as that file's deletion. So a modification
-        # renews the watch only when the folder is another one now.
-        if kind != Event.Modified: return True
+    def _replaced(self, watch : Watch, kind : Event, above : bool) -> bool:
+        # Whether a folder event may have replaced the watched folder. A
+        # folder is reported as modified whenever a file in it changes (on
+        # its own watch on Linux, on its parent's on Windows); watching it
+        # again each time could lose the events of the old watch, such as
+        # that file's deletion. So a modification of the watched folder
+        # itself renews the watch only when the folder is another one now.
+        # A modification above it may be the folder being created again,
+        # and renewing then also replaces a new watch that watchdog joined
+        # to the dead one of the folder that went away, which it may not
+        # have dropped yet.
+        if kind != Event.Modified or above: return True
         return _identity(watch[0]) != self._watch_ids.get(watch)
 
     def _unschedule(self, watch : Watch):
@@ -160,16 +165,14 @@ class FileWatcher(FileSystemEventHandler):
             for path, subscription in list(self._subscriptions.items()):
                 watch = self._anchor(path, subscription.tree)
                 dir_path = subscription.watch[0]
-                touched = any(
-                    event_path == dir_path or event_path in dir_path.parents
-                    for event_path in paths
-                )
+                above = any(event_path in dir_path.parents for event_path in paths)
+                touched = above or any(event_path == dir_path for event_path in paths)
                 if watch == subscription.watch and not touched: continue
                 if watch != subscription.watch:
                     self._watch(watch)
                     self._unwatch(subscription.watch)
                     subscription.watch = watch
-                elif watch not in refreshed and self._replaced(watch, kind):
+                elif watch not in refreshed and self._replaced(watch, kind, above):
                     refreshed.add(watch)
                     self._refresh(watch)
                 result.append((
