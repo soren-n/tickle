@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.7.0
+
 ### Added
 
 - Folders as inputs and outputs: a path ending with `/` names a folder. A task reading one reruns when a file in it changes, appears or goes; a task writing one gets it created, and before it runs again the files its last run left there, and that nobody changed, are removed. A task reading a file inside another task's output folder runs after it.
