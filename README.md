@@ -32,7 +32,7 @@ Tickle has two evaluation modes:
 
 In build system terms, offline mode is like a regular build, and online mode is like a watch/dev/live build. Both are incremental.
 
-Online mode applies a change once it has settled for a moment, without waiting for running tasks: a running task whose definition and inputs did not change carries on, and one whose did is stopped and started again. A generated file that is deleted is built again on the next change, not at once.
+Online mode applies a change once it has settled for a moment, without waiting for running tasks: a running task whose definition and inputs did not change carries on, and one whose did is stopped and started again. A generated file that is deleted is built again at once.
 
 Each task starts as soon as the tasks it reads from have finished, and those of the earlier stages of its flows. When several tasks are ready, the one heading the longest chain of work starts first, judged by how long the tasks took last time, so long chains do not end up last. Only one run can use a project at a time; a second one fails at once, naming the run that holds it.
 
@@ -107,7 +107,7 @@ Without `--keep-going`, nothing more starts after a task fails; the tasks alread
 
 Give targets after the mode, as task descriptions or output files, to run only them and the tasks they need: `tickle offline out/final.mp4`. `--dry-run` prints the tasks that would run, in an order they could run in, and why each would run (new or changed, an input changed, an output is missing, or it reads from a task that runs), without running them. A task that only reads from tasks that run may still be left alone, if they write what they wrote before.
 
-While evaluating, tickle prints each task as it starts; the lines are flushed at once, so they also appear as they happen when the output goes to a pipe or a file. Each task's output, stdout and stderr together, goes to a log file of its own in `tickle-logs` (set with `--log-dir`), replaced each time the task runs. When a task fails, the end of its output and the path of its log are printed as soon as it fails. A task that succeeds without writing all of its outputs is reported.
+While evaluating, tickle prints each task as it starts, and when it finishes, with how long it took and how many of the tasks to run have finished; offline mode ends with how many tasks ran and how long it took; the lines are flushed at once, so they also appear as they happen when the output goes to a pipe or a file. Each task's output, stdout and stderr together, goes to a log file of its own in `tickle-logs` (set with `--log-dir`), replaced each time the task runs. When a task fails, the end of its output and the path of its log are printed as soon as it fails. A task that succeeds without writing all of its outputs is reported.
 
 If you stick to the default paths and file names, then running tickle should be as simple as:
 ```

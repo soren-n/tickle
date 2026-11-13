@@ -64,7 +64,7 @@ Ready tasks are kept in a heap by priority: the longest chain of task weights (e
 
 `Evaluator.install(schedule, keep)` makes a schedule current, at any time. Each running task is either adopted by it, when the new schedule would start a task with the same key now and `keep` accepts the run, or cancelled. The modes pass a `keep` that accepts a run whose input closure still hashes as it did when the run started.
 
-Worker threads loop: under the evaluator's condition, take the next task from the current schedule (or wait), run it outside the lock, and record the outcome in the schedule that owns the run, which after adoption is the new one. A failure is reported at once on the worker (`on_task_failed`). A cancelled run's outcome is dropped. Any exception from a task's work becomes a `TaskError`, so a schedule always learns that a task ended.
+Worker threads loop: under the evaluator's condition, take the next task from the current schedule (or wait), run it outside the lock, and record the outcome in the schedule that owns the run, which after adoption is the new one. A failure is reported at once on the worker (`on_task_failed`), and so is a success (`on_task_done`, with the time it took and the schedule's progress), which the modes print. A cancelled run's outcome is dropped. Any exception from a task's work becomes a `TaskError`, so a schedule always learns that a task ended.
 
 The main loop waits on the condition until the current schedule has finished (nothing running, nothing more to start) and calls `on_finished`, which offline mode uses to stop. `stop()` may be called from any thread, more than once, also before `start`; nothing more starts, and with `cancel` the running tasks are cancelled too. An exception in the main loop, such as `KeyboardInterrupt`, cancels the running tasks before it propagates, and the workers are joined in every case.
 
@@ -81,7 +81,8 @@ The main loop waits on the condition until the current schedule has finished (no
 `OnlineEvaluator` watches the agenda, the depend file, every explicit input that no task produces, and every implicit file. Events are noted and applied once no new one has arrived for 0.3 seconds, one update at a time, judged by the files' content hashes:
 
 - agenda or depend file: recompile, rebuild the closures, the graph and the schedule;
-- input file: recompute validity and the schedule.
+- input file: recompute validity and the schedule;
+- output: if one is missing, recompute validity and the schedule, so a deleted output is built again at once (writing outputs also raises events, which then change nothing).
 
 The new schedule is installed without waiting for running tasks, which are adopted or cancelled as above. A change is applied only if everything rebuilds: an agenda or depend file that does not load, or that introduces a cycle, is reported and the current schedule kept. A removed depend file counts as an empty one; a removed agenda is reported and ignored.
 

@@ -2,6 +2,7 @@
 from typing import Any
 from collections.abc import Callable
 from threading import Condition, RLock, Thread
+import time
 
 # Internal module dependencies
 from .schedule import Schedule, READY
@@ -226,6 +227,15 @@ class Evaluator:
     ###########################################################################
     # Callbacks
     ###########################################################################
+    def on_task_done(self,
+        task : Task,
+        seconds : float,
+        progress : tuple[int, int]
+        ) -> None:
+        """Called on the worker thread when a task succeeds, with how long it
+        took and how many tasks of its schedule have finished, of all."""
+        pass
+
     def on_task_failed(self, error : TaskError, retrying : bool) -> None:
         """Called on the worker thread as soon as a task fails."""
         pass
@@ -256,6 +266,7 @@ class Evaluator:
             if taken is None: return
             run, _, task = taken
             error : TaskError | None = None
+            started = time.monotonic()
             try:
                 output = task.perform(run)
                 if output: log.debug('%s: %s' % (task.description, output))
@@ -269,6 +280,7 @@ class Evaluator:
                     '%s: %s' % (type(other_error).__name__, other_error)
                 )
             state = None
+            progress = (0, 0)
             with self._condition:
                 owner, owned = self._running.pop(run)
                 if error is None and run.info.get('cutoff'): owned.cut_off = True
@@ -276,7 +288,14 @@ class Evaluator:
                     owner.cancel(owned)
                 elif owner is not None:
                     state = owner.finish(owned, error is None)
+                    progress = owner.progress()
                 self._condition.notify_all()
+            if error is None and state is not None and not owned.cut_off:
+                try: self.on_task_done(owned, time.monotonic() - started, progress)
+                except Exception as report_error:
+                    log.error('Failed reporting a finished task: %s: %s' % (
+                        type(report_error).__name__, report_error
+                    ))
             if error is not None and state is not None:
                 try: self.on_task_failed(error, state == READY)
                 except Exception as report_error:

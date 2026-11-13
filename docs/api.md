@@ -44,6 +44,7 @@ class Result:
     planned: list[str]     # a dry run's tasks
     reasons: dict[str, str]  # a dry run's reason for each planned task, such as 'its output out/x is missing'
     error: str | None      # why the run could not start: no agenda, an invalid agenda or depend file, the lock is held, ...
+    seconds: float         # how long the run took
 ```
 
 A `Result` is true when the run did everything it had to: no task failed, was skipped or was blocked, and `error` is `None`. So `if offline(...)` keeps working as it did when `offline` returned a `bool`.

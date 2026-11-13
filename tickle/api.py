@@ -69,6 +69,8 @@ class Result:
     reasons : dict[str, str] = field(default_factory = dict)
     # Why the run could not start, such as an invalid agenda
     error : str | None = None
+    # How long the run took
+    seconds : float = 0.0
 
     def __bool__(self) -> bool:
         return (
@@ -993,6 +995,24 @@ class _ProjectEvaluator(Evaluator):
     def on_finished(self, schedule : Schedule):
         self._cache.flush()
 
+    def on_task_done(self,
+        task : Task,
+        seconds : float,
+        progress : tuple[int, int]
+        ):
+        log.info('Finished \"%s\" in %s (%d of %d)' % (
+            task.description, _duration(seconds), progress[0], progress[1]
+        ))
+
+def _duration(seconds : float) -> str:
+    """A duration for people: 0.4s, 12s, 3m05s or 2h10m."""
+    if seconds < 10: return '%.1fs' % seconds
+    if seconds < 60: return '%ds' % seconds
+    minutes, seconds = divmod(int(seconds), 60)
+    if minutes < 60: return '%dm%02ds' % (minutes, seconds)
+    hours, minutes = divmod(minutes, 60)
+    return '%dh%02dm' % (hours, minutes)
+
 class OfflineEvaluator(_ProjectEvaluator):
     def __init__(self,
         target_dir : Path,
@@ -1010,6 +1030,7 @@ class OfflineEvaluator(_ProjectEvaluator):
             log_dir or default_log_dir(target_dir), targets
         )
         self._dry_run = dry_run
+        self._seconds = 0.0
 
         # Initial load of agenda and depend
         if isinstance(agenda_source, agenda.Agenda):
@@ -1069,7 +1090,7 @@ class OfflineEvaluator(_ProjectEvaluator):
         self.stop()
 
     def result(self) -> Result:
-        result = Result(skipped = list(self.skipped))
+        result = Result(skipped = list(self.skipped), seconds = self._seconds)
         schedule = self.schedule()
         if schedule is None: return result
         # A task found up to date when it was about to start did not run
@@ -1086,6 +1107,7 @@ class OfflineEvaluator(_ProjectEvaluator):
 
     def start(self):
         log.info('Beginning of evaluation in offline mode')
+        started = time.monotonic()
         self._watcher.start()
 
         # A change made before the watcher started has no event
@@ -1097,6 +1119,7 @@ class OfflineEvaluator(_ProjectEvaluator):
             # that waits on that worker
             self._watcher.stop()
             self._cache.flush()
+            self._seconds = time.monotonic() - started
         log.info('End of evaluation in offline mode')
 
 def _check_paths(target_dir : Path, *paths : Path | None):
@@ -1107,6 +1130,12 @@ def _check_paths(target_dir : Path, *paths : Path | None):
         assert path.is_relative_to(target_dir)
 
 def _summarise(result : Result):
+    if len(result.succeeded) + len(result.failed) != 0:
+        log.info('Ran %d task(s) in %s%s' % (
+            len(result.succeeded) + len(result.failed),
+            _duration(result.seconds),
+            '; %d failed' % len(result.failed) if len(result.failed) != 0 else ''
+        ))
     for desc in result.failed:
         log.critical('Task \"%s\" failed' % desc)
     if len(result.blocked) != 0:
@@ -1213,6 +1242,7 @@ class OnlineEvaluator(_ProjectEvaluator):
             # Initial load of agenda and depend
             self._explicits : set[str] = set()
             self._implicits : set[str] = set()
+            self._outputs : set[str] = set()
             self._pools : dict[str, int] = dict()
             self._agenda_hash : str | None = _hash(agenda_path)
             self._depend_hash : str | None = _hash(depend_path)
@@ -1241,6 +1271,10 @@ class OnlineEvaluator(_ProjectEvaluator):
 
     def _event_depend(self, event : Event):
         self._request('depend')
+
+    def _event_output(self, event : Event):
+        # Writing outputs also gets here; only a missing one matters
+        self._request('outputs')
 
     def _event_source(self,
         source_key : str,
@@ -1307,9 +1341,13 @@ class OnlineEvaluator(_ProjectEvaluator):
             log.info('%s was modified, rescheduling' % (
                 _key(self._target_dir, source_key)
             ))
+        missing = 'outputs' in pending and any(
+            not os.path.lexists(output) for output in self._outputs
+        )
+        if missing: log.info('An output was removed, rescheduling')
         if rebuild:
             self._rebuild(self._agenda_data, self._pools)
-        elif len(changed) != 0:
+        elif len(changed) != 0 or missing:
             self._update_source()
 
     def _source_hash(self, source_key : str) -> str | None:
@@ -1372,6 +1410,14 @@ class OnlineEvaluator(_ProjectEvaluator):
         self._explicits = explicits
         self._watch(self._implicits, implicits.difference(explicits))
         self._implicits = implicits.difference(explicits)
+        outputs = {
+            str(output) for task_data in agenda_data for output in task_data.outputs
+        }
+        for output in self._outputs.difference(outputs):
+            self._watcher.unsubscribe(Path(output))
+        for output in outputs.difference(self._outputs):
+            self._watcher.subscribe(Path(output), self._event_output)
+        self._outputs = outputs
         self._agenda_data = agenda_data
         self._pools = pools
         self._tasks = tasks

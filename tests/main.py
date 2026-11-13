@@ -2659,6 +2659,37 @@ def _agenda_evaluate_online_folder(workers: int) -> bool:
     return ok and not runner.is_alive()
 
 
+@context(worker_counts)
+@prop('Online mode builds a deleted output again at once', attempts=_attempts(5))
+def _agenda_evaluate_online_deleted_output(workers: int) -> bool:
+    test_path = _fixture_path()
+    (test_path / 'src').mkdir()
+    (test_path / 'src' / 'a.txt').write_text('a')
+    script = [sys.executable, str(SUCCESS_SCRIPT), '-i', '$inputs', '-o', '$outputs']
+    agenda = ta.Agenda(procs = {'copy': script}, tasks = [ta.Task(
+        desc = 'Task copy', proc = 'copy',
+        args = {'inputs': ['src/a.txt'], 'outputs': ['out/a.txt']},
+        inputs = ['src/a.txt'], outputs = ['out/a.txt']
+    )])
+    agenda_path = test_path / 'agenda.yaml'
+    ta.store(agenda_path, agenda)
+    output = test_path / 'out' / 'a.txt'
+    with _quiet():
+        evaluator = tapi.online(test_path, agenda_path, worker_count = workers)
+        if evaluator is None: return False
+        runner = Thread(target = evaluator.start, daemon = True)
+        runner.start()
+        try:
+            if not _wait_for(lambda: output.exists()): return False
+            time.sleep(0.5)
+            output.unlink()
+            ok = _wait_for(lambda: output.exists(), 10.0)
+        finally:
+            evaluator.stop()
+            runner.join(timeout = 10)
+    return ok and not runner.is_alive()
+
+
 _DEPFILE_COMPILER = (
     'import sys, pathlib\n'
     'source, output, depfile = sys.argv[1:4]\n'
@@ -2815,6 +2846,7 @@ spec = conj(
     _agenda_evaluate_offline_folder_output,
     _agenda_evaluate_offline_folder_input,
     _agenda_evaluate_online_folder,
+    _agenda_evaluate_online_deleted_output,
     _agenda_evaluate_offline_cutoff,
     _agenda_evaluate_offline_depfile,
     _depfile_parse,

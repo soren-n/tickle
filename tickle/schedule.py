@@ -287,6 +287,15 @@ class Schedule:
             self.state[task] in (WAITING, READY) for task in self.tasks
         )
 
+    def progress(self) -> tuple[int, int]:
+        """How many tasks have finished, succeeded, failed or blocked, and
+        how many there are."""
+        finished = sum(
+            1 for task in self.tasks
+            if self.state[task] in (DONE, FAILED, BLOCKED)
+        )
+        return finished, len(self.tasks)
+
     def with_state(self, state : str) -> list[Task]:
         return [ task for task in self.tasks if self.state[task] == state ]
 

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added
+
+- Tickle prints a line when a task finishes, with how long it took and how many of the tasks to run have finished, and offline mode ends with how many tasks ran and how long that took (`Result.seconds`).
+
+### Fixed
+
+- Online mode built a deleted output again only on the next change; it now does so at once.
+
 ## 0.7.0
 
 ### Added
