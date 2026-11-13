@@ -1,0 +1,5 @@
+# Mechanical changes that git blame should skip:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+# Use builtin generics and union syntax in annotations
+e590f6538c46fb26fae9af84db816b62398ddae9
