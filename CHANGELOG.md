@@ -10,6 +10,7 @@
 
 - Online mode built a deleted output again only on the next change; it now does so at once.
 - Every offline dry run, run rejected before it started (such as for a cycle) and online evaluator closed without running kept an inotify instance and a thread on Linux, so a long-lived process calling the API ran out of inotify instances (`OSError: [Errno 24] inotify instance limit reached`). The file watcher now makes its observer only when it starts.
+- On Windows, dry-run reasons and other messages named paths with `\` (`its output temp\file_0.txt is missing`); they now name paths relative to the project with `/` on every platform, as agendas write them.
 
 ## 0.7.0
 

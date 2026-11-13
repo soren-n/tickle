@@ -127,6 +127,13 @@ def _key(target_dir : Path, path : str) -> str:
     rel_path = _rel(target_dir, path)
     return rel_path + '/' if _is_folder_key(path) else rel_path
 
+def _name(target_dir : Path, path : Any) -> str:
+    """How messages name a path or closure entry: relative to the target
+    directory with / separators on every platform, as agendas write
+    paths, and a trailing / for a folder key."""
+    name = _rel(target_dir, path).replace(os.sep, '/')
+    return name + '/' if _is_folder_key(str(path)) else name
+
 def _is_inside(rel_path : str) -> bool:
     if os.path.isabs(rel_path): return False
     return rel_path != os.pardir and not rel_path.startswith(os.pardir + os.sep)
@@ -549,14 +556,14 @@ def _eval_cmd(
                 'the last %d lines' % len(lines) if count > len(lines) else 'all',
                 '\n'.join(lines)
             )
-        message += '\n(log: %s)' % _rel(target_dir, log_path)
+        message += '\n(log: %s)' % _name(target_dir, log_path)
         raise TaskError(task_data.description, message)
 
     # Report what the task did not do
     for output_path in sorted(task_data.outputs):
         if output_path.exists(): continue
         log.warning('"%s" succeeded without writing %s' % (
-            task_data.description, _rel(target_dir, output_path)
+            task_data.description, _name(target_dir, output_path)
         ))
 
     # The files its depfile names now count as its inputs: those it named
@@ -566,7 +573,7 @@ def _eval_cmd(
         deps = depfile.load(task_data.depfile)
         if deps is None:
             log.warning('"%s" succeeded without writing its depfile %s' % (
-                task_data.description, _rel(target_dir, task_data.depfile)
+                task_data.description, _name(target_dir, task_data.depfile)
             ))
         else:
             own = { str(path) for path in task_data.outputs }
@@ -816,7 +823,7 @@ def _make_schedule(
                 if reason is None: continue
                 log.error('Skipping task \"%s\": input %s %s' % (
                     task_data.description,
-                    _rel(target_dir, input_path),
+                    _name(target_dir, input_path),
                     reason
                 ))
                 task.set_active(False)
@@ -864,10 +871,11 @@ def _make_schedule(
             task.set_valid(False)
             # A generated input is better explained by the task writing it,
             # when that one runs; see below
+            name = _name(target_dir, file_path)
             if _produced(Path(file_path.rstrip(os.sep))):
-                fallback[task] = 'its input %s changed' % key
+                fallback[task] = 'its input %s changed' % name
             else:
-                task.reason = 'its input %s changed' % key
+                task.reason = 'its input %s changed' % name
             break
 
     # Check output files
@@ -877,10 +885,9 @@ def _make_schedule(
                 continue
             tasks[index].set_valid(False)
             if tasks[index].reason == '':
-                tasks[index].reason = 'its output %s is missing' % (
-                    _key(target_dir, _folder_key(output))
-                    if output in task_data.folders else
-                    _rel(target_dir, output)
+                tasks[index].reason = 'its output %s is missing' % _name(
+                    target_dir,
+                    _folder_key(output) if output in task_data.folders else output
                 )
             break
 
@@ -1339,7 +1346,7 @@ class OnlineEvaluator(_ProjectEvaluator):
             changed.append(source_key)
         for source_key in changed:
             log.info('%s was modified, rescheduling' % (
-                _key(self._target_dir, source_key)
+                _name(self._target_dir, source_key)
             ))
         missing = 'outputs' in pending and any(
             not os.path.lexists(output) for output in self._outputs
