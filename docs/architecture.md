@@ -21,9 +21,9 @@ Every mode runs the same pipeline. Paths in the agenda are relative to the agend
 `agenda.load` reads the YAML into the `Agenda` dataclasses through `dataspec`, whose errors say where in the file a value does not fit, such as `tasks[2].inputs`. `agenda.compile` then produces a `CompiledTask` per task:
 
 - **Command**: the task's proc is a list of words; words starting with `$` are parameters. The argument vector is built word by word: a literal word is kept exactly (spaces, quotes and `%` included), and a parameter word is replaced by its argument values, one word per value. A missing argument is an error.
-- **Flows**: each flow is a list of stages, and each stage a list of procs. A task's `flows` map becomes `{flow: stage index}` for the flows it belongs to. A proc may appear in only one stage per flow, and a task's proc must be in a stage of each of its flows.
-- **Paths**: inputs and outputs are made absolute against the agenda file's directory.
-- **Hash**: an MD5 of the task's command, args, flows, inputs and outputs. It identifies the task across runs, independently of its position.
+- **Flows**: each flow is a list of stages, and each stage a list of procs. A task's `flows` map becomes `{flow: stage index}` for the flows it belongs to. A flow must have a non-empty name, a proc may appear in only one stage per flow, and a task's proc must be in a stage of each of its flows.
+- **Paths**: inputs and outputs are made absolute against the agenda file's directory and normalised (`os.path.normpath`), so every spelling of a path names the same file; depend file paths likewise.
+- **Hash**: an MD5 of the task's command, args, and normalised inputs and outputs. It identifies the task across runs, independently of its position. Flows are left out, since they only order tasks, so changing them reruns nothing.
 
 ## Depend closures
 
@@ -33,7 +33,7 @@ A task's input closure is its inputs plus their depend closures. It does not rea
 
 ## Building the task graph
 
-`_make_graph` creates an `evaluate.Task` per compiled task, whose work runs the command with `subprocess.run` in the target directory. Two tasks may not write the same output. A task depends on the task producing each file in its input closure: its explicit inputs, and files its inputs depend on through the depend file, such as a generated header. `Task.add_dependency` refuses a dependency on a task in a later stage of a shared flow.
+`_make_graph` creates an `evaluate.Task` per compiled task, whose work runs the command with `subprocess.run` in the target directory, with stdin from the null device so a task cannot wait on the terminal. Two tasks may not write the same output. A task depends on the task producing each file in its input closure: its explicit inputs, and files its inputs depend on through the depend file, such as a generated header. `Task.add_dependency` refuses a dependency on a task in a later stage of a shared flow.
 
 Because depend entries add dependencies, a change to the depend file builds the graph again rather than only the closures.
 
@@ -56,15 +56,17 @@ When a task starts, its worker hashes the input closure as it is at that moment;
 
 `graph.compile` reduces the invalid, active tasks to a `Program`:
 
+- The tasks to run are all invalid, active tasks. Propagation has already made every task after an invalid task invalid, so no search of the graph is needed; in particular a task that only a skipped task needs still runs.
 - A **sequence** is a list of tasks run in order by one worker. Each sequence currently holds one task; joining chains of tasks into longer sequences broke the stage order across flows and is left to the planned ready-queue scheduler.
-- A **batch** is a set of sequences that can run in parallel: their dependencies all lie in earlier batches.
-- Batches are computed per flow and stage, then combined into one list.
+- Within each flow, one barrier node is placed between consecutive stages, depending on every task of the earlier stage and depended on by every task of the later one. This keeps the graph linear in size, where edges from every task of a stage to every task of the next would be quadratic.
+- A **batch** is a set of sequences that can run in parallel: a task's batch is one more than the highest batch of its dependencies (Kahn's algorithm). A barrier passes its level on without adding one, so a task starts in the earliest batch its dependencies and stages allow; barriers are then left out.
+- Each dependency respects the stages of the flows its two tasks share, but dependencies can still form a cycle with the stage order of other flows. No task of such a cycle can start, so `compile` raises `RuntimeError` naming them rather than leave them out.
 
 ## Evaluation
 
 `Evaluator.start` starts the worker threads and then loops: it takes the next batch, puts each sequence on a queue, and waits for the queue to drain before moving on. Workers take sequences off the queue and run their tasks. A failing command, or one that cannot be started, raises `TaskError` in the worker, which passes it to the main loop; any other exception in a task is reported the same way under the task's description, so a batch always drains.
 
-Each program gets a generation number, and errors carry the generation of the program their task belonged to. The main loop reports every queued error through `on_task_error`, and clears the remaining program only if an error came from the current one, so a failure in an old program never cancels the program that replaced it. When the main loop has nothing to queue it calls `on_idle`, which the evaluators use to write the cache.
+Each program gets a generation number, and errors carry the generation of the program their task belonged to. The main loop reports every queued error through `on_task_error`, and clears the remaining program only if an error came from the current one, so a failure in an old program never cancels the program that replaced it. It checks the generation again after pausing, since a new program may have been installed while it waited for the lock. When the main loop has nothing to queue it calls `on_idle`, which the evaluators use to write the cache.
 
 `pause`/`resume` take the write side of a reader/writer lock. Workers hold the read side while they take and run a sequence, and the main loop while it queues a batch, so pausing waits for running sequences to finish and reprogramming never races with them. `stop` may be called from any thread, more than once; it ends the loop, and the workers are then stopped and joined.
 
@@ -87,7 +89,7 @@ A failing task is logged and the rest of the schedule dropped; the next change s
 
 ## Watching files
 
-`FileWatcher` subscribes callbacks to individual files by watching their folders. A file whose folder does not exist yet is watched through the nearest existing folder above it; when folders are created there the watch moves down, and a file that already exists by then is reported as created. Both paths of a move are checked, since saving by renaming a new file over a watched one is reported only as a move on some platforms. A callback that raises is logged rather than allowed to end the observer thread.
+`FileWatcher` subscribes callbacks to individual files by watching their folders. A file whose folder does not exist yet is watched through the nearest existing folder above it; when folders are created there the watch moves down, and a file that already exists by then is reported as created. Both paths of a move are checked, since saving by renaming a new file over a watched one is reported only as a move on some platforms. A callback that raises is logged rather than allowed to end the observer thread. A watched folder that is deleted and created again, or replaced by a rename, is not watched again; that is left to the planned watcher rework.
 
 ## The cache
 

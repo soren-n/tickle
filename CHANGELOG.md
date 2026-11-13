@@ -5,7 +5,7 @@
 ### Changed
 
 - Requires Python 3.11 or later, PyYAML 6.0.3 or later and watchdog 7.1.0 or later.
-- Task identity now covers the command a task runs, so the first run after upgrading reruns every task once.
+- Task identity now covers the command a task runs, so the first run after upgrading reruns every task once. It no longer covers the task's flows, which only order tasks, so changing a task's flows or stages does not rerun it.
 - Commands are built word by word: literal proc words are passed exactly as written, and each argument value becomes one word. Empty argument values are passed on instead of being dropped.
 - Evaluation no longer waits on fixed one-second polls, so a run takes about 0.1 seconds of overhead instead of about 2.
 - Packaging moved from `setup.py` to `pyproject.toml`; the project is developed with uv.
@@ -17,9 +17,20 @@
 - The CLI exits with 1 on failure instead of 255, and with 130 when interrupted.
 - Agenda and depend errors say where the problem is, such as `tasks[2].inputs: ...`.
 - Agendas are parsed with PyYAML's C loader when it is available, which is several times faster for large agendas.
+- Paths in the agenda and depend file are normalised: `out/x.txt`, `./out/x.txt` and `out/../out/x.txt` name the same file, so a task reading one spelling depends on the task writing another, and two tasks writing one file under different spellings are rejected.
+- A flow named by the empty string is rejected.
+- Tasks run with no stdin, so a task that reads its input from stdin gets an empty one instead of waiting on the terminal.
+- Tickle logs to the `tickle` logger instead of the root logger, so it no longer configures logging for a script that calls the API. Progress lines are flushed as they are printed, so they show up as they happen when the output goes to a pipe or a file.
+- Within a stage, a task now waits only for the tasks it depends on, not for every task scheduled before it, and every task starts in the earliest step its dependencies and stages allow.
+- An agenda whose dependencies, including those from the depend file, form a cycle together with the stage order of flows is rejected, naming the tasks involved; for example, with two flows of two stages each, a task in the first stage of one flow reading the output of a task in the second stage of the other, and the other way around.
+- The CLI rejects agenda, depend, cache and log paths outside the current directory, and cache and log paths in folders that do not exist, with exit code 2, instead of failing with a traceback.
 
 ### Fixed
 
+- Offline evaluation could wait forever when a depend entry made a task depend on a task of another flow, because the scheduler left tasks out of the schedule; it also silently left out the tasks of a cycle through stage order.
+- In online mode, a failure could still cancel the schedule built for a change saved just after it, when that schedule was installed while the failure was being reported.
+- Online mode never ran an out-of-date task whose only dependents were skipped because one of their inputs was missing; offline mode did.
+- Scheduling took time and memory quadratic to cubic in the number of tasks per step: two steps of 4000 tasks took 396 seconds to schedule, and now take 0.04; two steps of 20000 take 0.4 seconds and 114 MB.
 - A task that failed or was interrupted counted as up to date on the next run when its output was left from an earlier run, because its input hashes were recorded before it ran.
 - In online mode, an input edited while its task was running was recorded as built, so the output stayed stale.
 - `tickle clean` could delete a hand-written file that an earlier version of the agenda generated, and crashed in a copied project or with an unreadable cache.

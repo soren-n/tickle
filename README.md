@@ -7,7 +7,7 @@
 # Tickle
 A command line workflow automation tool which performs task graph scheduling and concurrent task evaluation.
 
-Think of tickle as a generalised version of [ninja](https://github.com/ninja-build/ninja), i.e. not just for compiling native code projects, but for arbitrary concurrent evaluation of command line tasks. Tickle was initially conceived as a general backend for build systems, but can be used as a backend for any system that needs to schedule and evaluate command line tasks that produce and consume files concurrently.
+Tickle is made for pipelines that a script generates: long running tasks over large files, such as converting, rendering or encoding many files in several steps. The script writes an agenda of tasks, each a command with the files it reads and writes, and tickle runs them in dependency order, as many at a time as you allow, and on the next run only the tasks whose command or input files changed, together with the tasks after them. Like [ninja](https://github.com/ninja-build/ninja), it is a backend that executes a task graph rather than a language for writing one; unlike ninja, it is not tuned for builds of many small, fast compile steps.
 
 Tickle takes as input a description of tasks to be performed and their dependencies; this is in the form of two files: _agenda_ and _depend_. It then compiles an evaluation schedule for these tasks; checking their input and output files for changes against a persistent cache, as well as checking status of task dependencies. I.e. only tasks that need to or can be re/evaluated will be scheduled.
 
@@ -31,6 +31,12 @@ Tickle has two evaluation modes:
 - The __online mode__ will watch the _agenda_ file and the initial input files for changes, as well as the _depend_ file for dynamic dependency changes. It will then dynamically schedule and evaluate as the task graph changes.
 
 In build system terms, offline mode is like a regular build, and online mode is like a watch/dev/live build. Both are incremental.
+
+Online mode currently has these limits:
+
+- A change is applied once the tasks that are running have finished, which can take a while with long tasks.
+- If the folder of a watched input is deleted and created again, or replaced by renaming another folder over it, changes to the files in it are no longer noticed; restart online mode after such a change.
+- A generated file that is deleted is built again on the next change, not at once.
 
 # Assumptions
 Tickle assumes that it has full control over the input and output files described in the agenda. The only files that tickle supports modification to during runtime are: the agenda file, the depend file and the initial input files.
@@ -84,9 +90,9 @@ The CLI has two additional modes to offline/online:
 The clean mode will only delete generated folders if they are empty after generated files are deleted; i.e. if there are leftover files in the folders, e.g. generated from other processes not within the control of tickle; these files and the host folders are then left untouched.
 Clean also keeps a generated file that the current agenda or depend file now reads as a source, a file that changed after tickle last wrote it, and anything outside the current directory.
 
-The exit code is 0 on success and 1 on failure: a task failed, the agenda or depend file is invalid, or offline mode skipped tasks that could not run. Interrupting offline mode with Ctrl-C exits with 130; the tasks that did not finish run again next time.
+The exit code is 0 on success and 1 on failure: a task failed, the agenda or depend file is invalid, or offline mode skipped tasks that could not run. An invalid command line, such as a cache file outside the current directory or in a folder that does not exist, exits with 2. Interrupting offline mode with Ctrl-C exits with 130; the tasks that did not finish run again next time.
 
-While evaluating, tickle prints each task as it starts. A task that succeeds but writes to stderr, such as a compiler warning, has that output printed as a warning, as does a task that succeeds without writing all of its outputs. A failing task's stderr, or its stdout if stderr is empty, is printed with the failure.
+While evaluating, tickle prints each task as it starts; the lines are flushed at once, so they also appear as they happen when the output goes to a pipe or a file. A task that succeeds but writes to stderr, such as a compiler warning, has that output printed as a warning, as does a task that succeeds without writing all of its outputs. A failing task's stderr, or its stdout if stderr is empty, is printed with the failure.
 
 If you stick to the default paths and file names, then running tickle should be as simple as:
 ```
@@ -213,7 +219,8 @@ Commands are run directly, not through a shell, so shell syntax such as pipes, r
 
 The flows section defines a list of workflows.
 A workflow is a sequence of stages. A stage is a list of procs, defining which procs are allowed to be evaluated in parallel.
-Within a workflow, every task of a stage is started only after the tasks of the earlier stages, and a task may not depend on a task of a later stage. A proc can be part of only one stage per workflow.
+Within a workflow, every task of a stage is started only after the tasks of the earlier stages, and a task may not depend on a task of a later stage. A proc can be part of only one stage per workflow. Dependencies must also not form a cycle together with the stage order of several workflows; for example, with two workflows of two stages each, a task in the first stage of one workflow reading the output of a task in the second stage of the other, and the other way around. Such an agenda is rejected.
+Stages only order tasks: a task does not rerun because a task of an earlier stage did, unless it reads one of that task's outputs, and changing a task's flows does not make it rerun.
 This is useful when you have a clear separation in the evaluation order between groups of tasks; you could achieve the same ordering without stages, by having a many-to-many dependency between the task groups that need separating, which however would be costly on the scheduler. So stages were added as both a semantic convenience as well as an optimisation.
 
 Most likely you will only need to define one workflow; however there are cases where you would wish to evaluate two agendas in parallel, or with some overlap. In this case it is more beneficial to keep these two agenda in the same evaluation context; i.e. defining multiple workflows allows you to do that.
@@ -237,6 +244,10 @@ A task records its inputs only when it succeeds, so a task that failed or was in
 
 A task with an input that does not exist and that no task produces is skipped, together with the tasks that depend on it. The rest of the agenda is still evaluated, and offline mode then fails. Inputs must be files; a task with a folder as an input is skipped the same way.
 
+A task must have at least one output; a task without outputs is skipped the same way. For a task that only has an effect elsewhere, such as uploading a file, let its command also write a small stamp file and list that as its output.
+
+Paths may be written in any equivalent way: `out/x.txt`, `./out/x.txt` and `out/../out/x.txt` name the same file, and changing how a path is written does not make a task rerun.
+
 You should think of the agenda file as describing the explicit dependencies between files for a task, e.g. source file to object file in a code project build workflow.
 
 For more context please check out the examples directory.
@@ -253,6 +264,8 @@ The depend file is a YAML file with the following grammar:
 The file defines a dictionary of file path to list of file paths, i.e. a file path dependency graph; paths are relative to the depend file's folder.
 The dependencies must not form a cycle, neither among themselves nor together with the tasks of the agenda.
 When a task's input depends, directly or not, on a file that another task produces, the task runs after that task, as if the file were one of its inputs; the stage rules of flows apply to such dependencies too.
+
+An entry's key is a file that tasks read, and the entry makes those tasks rerun when the listed files change. Key entries by the source files that tasks take as inputs, not by the files they produce: the dependency output of a compiler such as `gcc -MD` is keyed by the object file, and an entry keyed by `main.o` would rerun the task that reads `main.o`, not the task that compiles it.
 
 You should think of the depend file as describing the implicit dependencies between files for a task, i.e. uncovered by scanning the content of the files; e.g. source file to header file in a code project build workflow; the source file to header file dependencies change more often during development than the task dependencies mentioned earlier, and as such should be defined in the depend file and not the agenda file.
 
@@ -271,6 +284,8 @@ The project is managed with [uv](https://docs.astral.sh/uv/). The tests are prop
 $ uv sync
 $ uv run minigun --time-budget 60
 ```
+
+A run takes about ten minutes, mostly in properties that run agendas and so start many processes; their attempt counts are not limited by the time budget. Set `TICKLE_TEST_ATTEMPT_SCALE` (for example to `0.2`) to make fewer attempts, as CI does on Windows, and use `--select` with part of a property's description to run only matching properties.
 
 The code is checked with ruff, for bugs only since the project keeps its own formatting, and with pyright:
 ```

@@ -2,7 +2,7 @@
 
 Tickle can be driven from Python instead of the CLI, typically by a script that generates the agenda and then evaluates it. The README has short examples; this page lists the public functions and types.
 
-All paths passed to the API must be absolute `pathlib.Path` objects, and the agenda, depend and cache paths must lie within the target directory. Tasks run with the target directory as their working directory.
+All paths passed to the API must be absolute `pathlib.Path` objects, and the agenda, depend and cache paths must lie within the target directory. Tasks run with the target directory as their working directory and with no stdin.
 
 ## `tickle.api`
 
@@ -77,7 +77,7 @@ compile(target_dir: Path, agenda_data: Agenda) -> list[CompiledTask]
 
 `load` raises `RuntimeError` for a file that cannot be read, malformed YAML, or data that does not fit the types above; the message says where, as in `tasks[2].inputs: ...` (`tickle.depend.load` likewise).
 
-`compile` validates an agenda without running it; it raises `RuntimeError` for an undefined proc or flow, a proc used in two stages of one flow, or a task whose proc is in no stage of one of its flows. Problems between tasks, such as two tasks writing the same output or a dependency on a later stage, are found when an evaluator builds the task graph.
+`compile` validates an agenda without running it; it raises `RuntimeError` for an undefined proc or flow, a flow named by the empty string, a proc used in two stages of one flow, or a task whose proc is in no stage of one of its flows. Input and output paths are normalised, so equivalent spellings of a path name the same file. Problems between tasks, such as two tasks writing the same output, a dependency on a later stage, or dependencies forming a cycle with the stage order of flows, are found when an evaluator builds and schedules the task graph.
 
 ## `tickle.depend`
 
@@ -95,4 +95,4 @@ A generator that discovers implicit dependencies, such as a compiler's header de
 
 ## Logging
 
-Tickle prints progress as `[tickle] ...` lines on stdout and also logs through the `logging` root logger; configure a handler (the CLI uses `logging.basicConfig` with a file) to keep the log. Warnings, such as a succeeding task's stderr, are logged at `WARNING`.
+Tickle prints progress as `[tickle] ...` lines on stdout, flushed as they are printed, and also logs to the `tickle` logger of the `logging` module. It leaves the root logger and the process's logging setup alone; records propagate to the root logger, so a handler configured there (the CLI uses `logging.basicConfig` with a file) keeps the log, and without one nothing extra is printed. Warnings, such as a succeeding task's stderr, are logged at `WARNING`.

@@ -6,6 +6,7 @@ Tickle is published to PyPI as `tickle-soren-n`. Releases are tagged `vX.Y.Z` on
    ```
    uv run minigun --time-budget 60
    ```
+   This takes about ten minutes.
    Also run the example project in a copy outside the repo (`tickle offline`, edit a source, `tickle offline`, `tickle clean`), and check that CI passed on the commit, which covers Linux, macOS and Windows.
 
 2. **Bump the version** in `tickle/__init__.py` (`__version__`). It is the only place the version is recorded. Rename the "Unreleased" section of `CHANGELOG.md` to the new version, then commit both as "Prepare vX.Y.Z".
