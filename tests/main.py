@@ -2611,6 +2611,52 @@ def _watcher_folder_gone(how: str) -> bool:
     return events == ['Deleted']
 
 
+@prop('A folder reported as modified keeps its watch unless another folder took its place', attempts=_attempts(5))
+def _watcher_keeps_modified_folder() -> bool:
+    """Windows reports a folder as modified whenever a file in it changes;
+    watching the folder again each time could lose the events of the old
+    watch, such as that file's deletion. A folder replaced by another must
+    still be watched again."""
+    import tickle.watch as twatch
+    from watchdog.events import DirModifiedEvent
+    test_path = _fixture_path()
+    folder = test_path / 'out'
+    folder.mkdir()
+    (folder / 'a.txt').write_text('a')
+    scheduled: list[str] = []
+
+    class _Recorder:
+        # Records what the watcher schedules, and delivers no events of its
+        # own, which would renew watches on another thread
+        def schedule(self, handler, path, **kwargs):
+            scheduled.append(str(path))
+            return object()
+        def unschedule(self, watch): pass
+        def start(self): pass
+        def stop(self): pass
+        def join(self): pass
+
+    real_observer = twatch.Observer
+    twatch.Observer = _Recorder  # type: ignore
+    watcher = twatch.FileWatcher()
+    try:
+        watcher.subscribe(folder / 'a.txt', lambda event: None)
+        watcher.start()
+        scheduled.clear()
+        for _ in range(3):
+            watcher.on_any_event(DirModifiedEvent(str(folder)))
+        if scheduled != []: return False
+        other = test_path / 'other'
+        other.mkdir()
+        shutil.rmtree(folder)
+        os.rename(other, folder)
+        watcher.on_any_event(DirModifiedEvent(str(folder)))
+        return scheduled == [str(folder)]
+    finally:
+        watcher.stop()
+        twatch.Observer = real_observer
+
+
 def _inotify_count() -> int | None:
     """The inotify instances this process holds, where /proc shows them."""
     fd_dir = Path('/proc/self/fd')
@@ -2914,6 +2960,34 @@ def _agenda_evaluate_offline_explain(
     )
 
 
+@context(worker_counts, g.one_of(['source', 'header']))
+@prop('A dry run names a changed input as the agenda writes it, with /', attempts=_attempts(10))
+def _agenda_evaluate_offline_explain_input(workers: int, which: str) -> bool:
+    """Reasons name paths relative to the project with / on every
+    platform, also for a file read through the depend file."""
+    test_path = _fixture_path()
+    (test_path / 'src' / 'sub').mkdir(parents = True)
+    (test_path / 'include' / 'sub').mkdir(parents = True)
+    (test_path / 'src' / 'sub' / 'a.txt').write_text('a')
+    (test_path / 'include' / 'sub' / 'a.h').write_text('h')
+    tdep.store(test_path / 'depend.yaml', {'src/sub/a.txt': ['include/sub/a.h']})
+    script = [sys.executable, str(SUCCESS_SCRIPT), '-i', '$inputs', '-o', '$outputs']
+    agenda = ta.Agenda(procs = {'copy': script}, tasks = [ta.Task(
+        desc = 'Task copy', proc = 'copy',
+        args = {'inputs': ['src/sub/a.txt'], 'outputs': ['out/sub/a.txt']},
+        inputs = ['src/sub/a.txt'], outputs = ['out/sub/a.txt']
+    )])
+    if not _run_offline(test_path, agenda, workers)[0]: return False
+    changed = 'src/sub/a.txt' if which == 'source' else 'include/sub/a.h'
+    (test_path / changed).write_text('changed')
+    result, _, printed = _offline_result(test_path, agenda, workers, dry_run = True)
+    reason = 'its input %s changed' % changed
+    return (
+        result.reasons.get('Task copy') == reason
+        and ('Would run "Task copy": %s' % reason) in printed
+    )
+
+
 @context(worker_counts, g.int_range(1, 3))
 @prop('A file rewritten right after a run is hashed again, even with its size and time kept', attempts=_attempts(10))
 def _agenda_evaluate_offline_racy_edit(workers: int, size: int) -> bool:
@@ -3161,6 +3235,7 @@ spec = conj(
     _agenda_evaluate_online_adopts,
     _watcher_reanchors,
     _watcher_folder_gone,
+    _watcher_keeps_modified_folder,
     _agenda_evaluate_watchers_released,
     _agenda_evaluate_offline_folder_output,
     _agenda_evaluate_offline_folder_input,
@@ -3170,6 +3245,7 @@ spec = conj(
     _agenda_evaluate_offline_depfile,
     _depfile_parse,
     _agenda_evaluate_offline_explain,
+    _agenda_evaluate_offline_explain_input,
     _agenda_hash_ignores_scheduling,
     _agenda_evaluate_offline_racy_edit,
     _schedule_dry_order,
