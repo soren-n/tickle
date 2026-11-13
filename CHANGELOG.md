@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.0
+
 ### Upgrading
 
 The cache moves to format 3; a cache written by 0.5.0 is migrated, so upgrading reruns nothing (every input is hashed once). A cache written by a newer tickle is refused and left alone. A task's output now goes to a log file in `tickle-logs` instead of being printed. `api.offline` returns a `Result`, which is true when the run succeeded, so `if offline(...)` keeps working; code comparing the result with `True` must use `bool(...)`.
