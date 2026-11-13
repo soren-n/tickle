@@ -2,29 +2,28 @@
 
 ## Unreleased
 
-### Added
-
-- Tickle prints a line when a task finishes, with how long it took and how many of the tasks to run have finished, and offline mode ends with how many tasks ran and how long that took (`Result.seconds`).
-
-### Fixed
-
-- Online mode built a deleted output again only on the next change; it now does so at once.
-- On Windows, online mode could miss the deletion of an output or source: a folder reported as modified because a file in it changed made the watcher watch that folder again, which could drop the deletion. The watcher now watches a folder again on a modification only when it is another folder, and after moving or renewing a watch it also reports files that are gone.
-- Every offline dry run, run rejected before it started (such as for a cycle) and online evaluator closed without running kept an inotify instance and a thread on Linux, so a long-lived process calling the API ran out of inotify instances (`OSError: [Errno 24] inotify instance limit reached`). The file watcher now makes its observer only when it starts.
-- On Windows, dry-run reasons and other messages named paths with `\` (`its output temp\file_0.txt is missing`); they now name paths relative to the project with `/` on every platform, as agendas write them.
-
 ## 0.7.0
+
+### Upgrading
+
+0.5.0 and 0.6.0 were prepared but not published; coming from 0.4.1, read their upgrade notes too. The first run after upgrading from 0.4.1 reruns every task once, since the cache has a new format and tasks are identified differently; `tickle clean` still reads the old cache.
 
 ### Added
 
 - Folders as inputs and outputs: a path ending with `/` names a folder. A task reading one reruns when a file in it changes, appears or goes; a task writing one gets it created, and before it runs again the files its last run left there, and that nobody changed, are removed. A task reading a file inside another task's output folder runs after it.
 - Early cutoff: a task that reruns and writes what it wrote before no longer reruns the tasks after it.
 - Per-task depfiles (`depfile` on a task): after the task succeeds, the files its make-syntax depfile names, such as the headers `gcc -MD` lists, count as its inputs.
-- A dry run says why each task would run: new or changed, which input changed, which output is missing, or which task it reads from. `Result.reasons` holds the same.
+- A dry run says why each task would run: new or changed, which input changed, which output is missing, or which task it reads from. `Result.reasons` holds the same, naming paths relative to the project with `/` on every platform.
+- Tickle prints a line when a task finishes, with how long it took and how many of the tasks to run have finished, and offline mode ends with how many tasks ran and how long that took (`Result.seconds`).
+- Online mode builds a deleted output again at once.
 
 ### Changed
 
 - A task out of date only because a task it reads from runs is checked again when it is about to start, and left alone if its inputs came out unchanged; such a task is neither printed nor listed as succeeded.
+
+### Fixed
+
+- A run that was made but never started, such as a dry run, a run rejected for a cycle or an online evaluator closed without running, kept an inotify instance and a thread on Linux, so a long-lived process calling the API ran out of inotify instances (`OSError: [Errno 24] inotify instance limit reached`).
 
 ## 0.6.0
 
