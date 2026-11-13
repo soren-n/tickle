@@ -169,9 +169,7 @@ class FileWatcher(FileSystemEventHandler):
                 touched = above or any(event_path == dir_path for event_path in paths)
                 if watch == subscription.watch and not touched: continue
                 if watch != subscription.watch:
-                    self._watch(watch)
-                    self._unwatch(subscription.watch)
-                    subscription.watch = watch
+                    self._move(subscription, watch)
                 elif watch not in refreshed and self._replaced(watch, kind, above):
                     refreshed.add(watch)
                     self._refresh(watch)
@@ -179,7 +177,36 @@ class FileWatcher(FileSystemEventHandler):
                     subscription.callback,
                     Event.Created if path.exists() else Event.Deleted
                 ))
+
+            # A folder may go away between finding it and watching it, such
+            # as one being deleted while its event is handled; a watch that
+            # could not be made moves up to the nearest folder that exists,
+            # or the file would hear of nothing again
+            for _ in range(64):
+                moved = False
+                for path, subscription in list(self._subscriptions.items()):
+                    if not self._unwatched(subscription.watch): continue
+                    watch = self._anchor(path, subscription.tree)
+                    if watch == subscription.watch: continue
+                    self._move(subscription, watch)
+                    moved = True
+                    result.append((
+                        subscription.callback,
+                        Event.Created if path.exists() else Event.Deleted
+                    ))
+                if not moved: break
         return result
+
+    def _move(self, subscription : _Subscription, watch : Watch):
+        try: self._watch(watch)
+        except Exception as error:
+            log.debug('FileWatcher: could not watch %s: %s' % (watch[0], error))
+        self._unwatch(subscription.watch)
+        subscription.watch = watch
+
+    def _unwatched(self, watch : Watch) -> bool:
+        # Whether a running watcher failed to watch this folder
+        return self._observer is not None and watch not in self._watch_objs
 
     def start(self):
         with self._lock:

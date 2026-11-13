@@ -2676,6 +2676,52 @@ def _watcher_keeps_modified_folder() -> bool:
         twatch.Observer = real_observer
 
 
+@prop('A watch that cannot be renewed because its folder went away moves up to the folder above', attempts=_attempts(5))
+def _watcher_renew_fails() -> bool:
+    """A folder event may be handled while the folder still exists, and
+    the folder be gone when its watch is renewed: renewing drops the old
+    watch with its pending deletion event, and the new one cannot be made.
+    The file must then be watched through the folder above, not through no
+    watch at all, so that the folder appearing again is noticed."""
+    import tickle.watch as twatch
+    from watchdog.events import DirDeletedEvent
+    test_path = _fixture_path()
+    folder = test_path / 'src'
+    folder.mkdir()
+    (folder / 'file.txt').write_text('a')
+    scheduled: list[str] = []
+
+    class _Vanishing:
+        # Deletes the folder when asked to watch it a second time, as if it
+        # went away just then, and fails as watchdog would
+        def schedule(self, handler, path, **kwargs):
+            if str(path) == str(folder) and str(folder) in scheduled:
+                shutil.rmtree(folder, ignore_errors = True)
+            if not Path(path).is_dir():
+                raise FileNotFoundError(2, 'No such file or directory', str(path))
+            scheduled.append(str(path))
+            return object()
+        def unschedule(self, watch): pass
+        def start(self): pass
+        def stop(self): pass
+        def join(self): pass
+
+    events: list[str] = []
+    real_observer = twatch.Observer
+    twatch.Observer = _Vanishing  # type: ignore
+    watcher = twatch.FileWatcher()
+    try:
+        watcher.subscribe(folder / 'file.txt', lambda event: events.append(event.value))
+        watcher.start()
+
+        # Handled while the folder still exists, so its watch is renewed
+        watcher.on_any_event(DirDeletedEvent(str(folder)))
+    finally:
+        watcher.stop()
+        twatch.Observer = real_observer
+    return scheduled == [str(folder), str(test_path)] and events == ['Deleted']
+
+
 def _inotify_count() -> int | None:
     """The inotify instances this process holds, where /proc shows them."""
     fd_dir = Path('/proc/self/fd')
@@ -3255,6 +3301,7 @@ spec = conj(
     _watcher_reanchors,
     _watcher_folder_gone,
     _watcher_keeps_modified_folder,
+    _watcher_renew_fails,
     _agenda_evaluate_watchers_released,
     _agenda_evaluate_offline_folder_output,
     _agenda_evaluate_offline_folder_input,
