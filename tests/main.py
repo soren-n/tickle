@@ -2,6 +2,7 @@
 from collections.abc import Iterator
 from contextlib import contextmanager, redirect_stdout
 import copy
+import gc
 import importlib.util
 from pathlib import Path
 from threading import Lock, Thread
@@ -1380,15 +1381,23 @@ def _schedule_priority(
 
 def _scale_time(width: int) -> tuple[float, bool]:
     """The best of three times to propagate and schedule a wide graph, and
-    whether the schedule holds every task."""
+    whether the schedule holds every task. The garbage collector is off
+    while timing: its full collections grow with every object alive, which
+    made the larger graph take over seven times as long on Python 3.12
+    now and then, without anything quadratic in tickle."""
     best = float('inf')
     complete = True
     for _ in range(3):
         tasks = _wide_graph(width, 2)
-        start = time.monotonic()
-        tgraph.propagate(tasks)
-        schedule = tsched.Schedule(tasks, 8)
-        best = min(best, time.monotonic() - start)
+        gc.collect()
+        gc.disable()
+        try:
+            start = time.monotonic()
+            tgraph.propagate(tasks)
+            schedule = tsched.Schedule(tasks, 8)
+            best = min(best, time.monotonic() - start)
+        finally:
+            gc.enable()
         complete = complete and len(schedule.tasks) == len(tasks)
     return best, complete
 
@@ -2041,9 +2050,13 @@ def _logging_own_logger(missing: int) -> bool:
     finally:
         root.removeHandler(records)
     if root.handlers != handlers: return False
-    return len(records.records) != 0 and all(
-        record.name == 'tickle' for record in records.records
-    )
+    # Watchdog logs to its own loggers from its threads, such as when an
+    # observer, this run's or an earlier property's, stops while reading
+    own = [
+        record for record in records.records
+        if record.name.split('.')[0] != 'watchdog'
+    ]
+    return len(own) != 0 and all(record.name == 'tickle' for record in own)
 
 
 @context(g.int_range(0, 3), g.one_of(['offline', 'clean']))
@@ -2491,7 +2504,7 @@ def _agenda_evaluate_offline_task_log() -> bool:
         logged == ['line %d' % i for i in range(50)]
         and 'exited with code 3' in printed
         and 'line 49' in printed and 'line 10\n' not in printed
-        and str(logs[0].relative_to(test_path)) in printed
+        and logs[0].relative_to(test_path).as_posix() in printed
     )
 
 
