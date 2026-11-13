@@ -176,15 +176,15 @@ class Evaluator:
         finally:
             self._pause.release_read()
 
-    def _check(self) -> bool:
-        # Report every error that arrived, and say whether any of them came
-        # from the current program, which must then be dropped.
-        current = True
+    def _check(self) -> Set[int]:
+        # Report every error that arrived, and return the generations of the
+        # programs they came from; those programs must be dropped.
+        failed : Set[int] = set()
         while True:
             try: generation, error = self._exception.get(block = False)
-            except Empty: return current
+            except Empty: return failed
             self._exception.task_done()
-            if generation == self._generation: current = False
+            failed.add(generation)
             self.on_task_error(error)
 
     def on_task_error(self, error : TaskError) -> None:
@@ -218,9 +218,13 @@ class Evaluator:
         try:
             while self._running:
                 self._wake.clear()
-                if not self._check() and len(self._program) != 0:
+                failed = self._check()
+                if self._generation in failed and len(self._program) != 0:
+                    # Check again once paused: a new program may have been
+                    # installed while waiting, and must not be dropped
                     self.pause()
-                    try: self.deprogram()
+                    try:
+                        if self._generation in failed: self.deprogram()
                     finally: self.resume()
                 if self._next_batch() is None:
                     self.on_idle()
