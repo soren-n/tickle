@@ -2,6 +2,7 @@
 from collections.abc import Iterator
 from pathlib import Path
 import math
+import os
 import sys
 
 from minigun import generate as g
@@ -21,6 +22,20 @@ FAILURE_SCRIPT = Path(__file__).parent.joinpath('tasks', 'failure.py').resolve()
 # Agenda generator
 ###############################################################################
 Graph = list[list[bool]]
+
+
+def respell(path: str, choice: int) -> str:
+    """The same path written another way, one of five, the first unchanged;
+    path may itself be respelled."""
+    path = os.path.normpath(path).replace(os.sep, '/')
+    folder, name = path.split('/', 1)
+    return [
+        path,
+        './' + path,
+        '%s/./%s' % (folder, name),
+        'other/../%s' % path,
+        '%s/../%s/%s' % (folder, folder, name)
+    ][choice]
 
 
 def _directed_acyclic_graph(task_count: int) -> g.Generator[Graph]:
@@ -59,7 +74,8 @@ def _topological_order(
 def _convert(
     graph_data: Graph,
     flows_data: list[list[bool]],
-    stage_bumps: list[int]
+    stage_bumps: list[int],
+    spellings: list[int]
 ) -> Agenda:
 
     # Decode graph
@@ -131,10 +147,13 @@ def _convert(
             for stage in sorted(flows[flow])
         ]
 
-    # Add tasks
+    # Add tasks. The inputs and outputs fields spell each path in one of
+    # several equivalent ways, which must name the same file; the args the
+    # script reads keep the plain spelling, so the commands stay the same.
     for task_index in deps:
         _inputs = [_file_path(dep) for dep in sorted(deps[task_index])]
         _outputs = [_file_path(task_index)]
+        spelling = spellings[task_index] if task_index < len(spellings) else 0
         result.tasks.append(Task(
             desc = 'Task %d' % task_index,
             proc = _proc_name(task_index),
@@ -143,8 +162,8 @@ def _convert(
                 'inputs': _inputs,
                 'outputs': _outputs
             },
-            inputs = _inputs,
-            outputs = _outputs
+            inputs = [respell(path, spelling) for path in _inputs],
+            outputs = [respell(path, spelling) for path in _outputs]
         ))
 
     # Done
@@ -161,7 +180,8 @@ def agendas(task_counts: g.Generator[int]) -> g.Generator[Agenda]:
                 0, task_count,
                 g.bounded_lists(0, flow_count, g.bools())
             ),
-            g.bounded_lists(0, task_count, g.int_range(0, 1))
+            g.bounded_lists(0, task_count, g.int_range(0, 1)),
+            g.bounded_lists(0, task_count, g.int_range(0, 4))
         )
     return g.bind(_sized, task_counts)
 
