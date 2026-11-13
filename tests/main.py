@@ -1,6 +1,7 @@
 # External module dependencies
 from collections.abc import Iterator
 from contextlib import contextmanager, redirect_stdout
+import copy
 import importlib.util
 from pathlib import Path
 from threading import Lock, Thread
@@ -234,6 +235,27 @@ def _dependents(agenda: ta.Agenda, task: ta.Task) -> set[str]:
     return result
 
 
+def _needed(agenda: ta.Agenda, descs: list[str]) -> set[str]:
+    """The descriptions of the named tasks and every task upstream of
+    them: what a run of those targets runs on a fresh project."""
+    producer = {
+        _norm(output): task
+        for task in agenda.tasks
+        for output in task.outputs
+    }
+    result: set[str] = set()
+    worklist = [task for task in agenda.tasks if task.desc in descs]
+    while len(worklist) != 0:
+        task = worklist.pop()
+        if task.desc in result: continue
+        result.add(task.desc)
+        worklist.extend(
+            producer[_norm(input)] for input in task.inputs
+            if _norm(input) in producer
+        )
+    return result
+
+
 def _outputs(test_path: Path, agenda: ta.Agenda) -> list[Path]:
     return [
         test_path / _norm(output)
@@ -286,15 +308,43 @@ def _agenda_generator_acyclic(agenda: ta.Agenda) -> bool:
 ###############################################################################
 # Agenda tests
 ###############################################################################
+def _annotate(agenda: ta.Agenda, rng: random.Random) -> ta.Agenda:
+    """A copy of the agenda with random values in the optional fields:
+    pools, and a pool, timeout, retry count and depfile for some tasks,
+    and sometimes a task that runs always. Each field is left at its
+    default about half the time, so a file holds a mix of both."""
+    result = copy.deepcopy(agenda)
+    if rng.random() < 0.5:
+        result.pools = {
+            'pool_%d' % index: rng.randint(1, 4)
+            for index in range(rng.randint(1, 3))
+        }
+    for task in result.tasks:
+        if len(result.pools) != 0 and rng.random() < 0.5:
+            task.pool = rng.choice(sorted(result.pools))
+        if rng.random() < 0.5: task.timeout = rng.choice([0.5, 10.0, 3600.0])
+        if rng.random() < 0.5: task.retries = rng.randint(1, 3)
+        if rng.random() < 0.5:
+            task.depfile = 'deps/%s.d' % task.desc.replace(' ', '_')
+    if len(result.procs) != 0 and rng.random() < 0.5:
+        result.tasks.append(ta.Task(
+            desc = 'Task always', proc = rng.choice(sorted(result.procs)),
+            args = {'inputs': [], 'outputs': []}, always = True
+        ))
+    return result
+
+
 @context(any_agendas)
 @prop('Agenda encode and decode are inverse')
-def _agenda_encode_decode_inverse(agenda: ta.Agenda) -> bool:
+def _agenda_encode_decode_inverse(agenda: ta.Agenda, rng: random.Random) -> bool:
+    agenda = _annotate(agenda, rng)
     return td.decode(ta.Agenda, td.encode(ta.Agenda, agenda)) == agenda
 
 
 @context(any_agendas)
 @prop('Agenda store and load are inverse')
-def _agenda_store_load_inverse(agenda: ta.Agenda) -> bool:
+def _agenda_store_load_inverse(agenda: ta.Agenda, rng: random.Random) -> bool:
+    agenda = _annotate(agenda, rng)
     agenda_path = _fixture_path() / 'agenda.yaml'
     ta.store(agenda_path, agenda)
     return agenda == ta.load(agenda_path)
@@ -302,9 +352,23 @@ def _agenda_store_load_inverse(agenda: ta.Agenda) -> bool:
 
 @context(any_agendas)
 @prop('Agenda compiles')
-def _agenda_compiles(agenda: ta.Agenda) -> bool:
+def _agenda_compiles(agenda: ta.Agenda, rng: random.Random) -> bool:
+    agenda = _annotate(agenda, rng)
     compiled = ta.compile(_fixture_path(), agenda)
     return len(compiled) == len(agenda.tasks)
+
+
+@context(any_agendas)
+@prop('Pools, timeouts, retries and always leave the task hash as it was')
+def _agenda_hash_ignores_scheduling(agenda: ta.Agenda, rng: random.Random) -> bool:
+    """They change when a task runs, not what it writes, so changing them
+    must not rerun a task for every user; a depfile does change it."""
+    annotated = _annotate(agenda, rng)
+    for task in annotated.tasks: task.depfile = ''
+    target_path = Path('/target')
+    before = ta.compile(target_path, agenda)
+    after = ta.compile(target_path, annotated)
+    return [task.hash for task in before] == [task.hash for task in after[:len(before)]]
 
 @context(text_agendas())
 @prop('Agenda store and load are inverse for any text')
@@ -713,8 +777,24 @@ def _agenda_evaluate_offline_matches_clean_build(
     for _ in range(step_count):
         action = rng.choice([
             'source', 'header', 'depend', 'output', 'reorder',
-            'args', 'proc', 'fail', 'unfail', 'move', 'respell', 'flows'
+            'args', 'proc', 'fail', 'unfail', 'move', 'respell', 'flows',
+            'keep_going', 'targets', 'dry'
         ])
+        # Runs with other options than the plain run
+        options: dict = {}
+        if action == 'keep_going':
+            options['keep_going'] = True
+        elif action == 'targets':
+            options['targets'] = [
+                task.desc for task in
+                rng.sample(agenda.tasks, rng.randint(1, len(agenda.tasks)))
+            ]
+        elif action == 'dry':
+            # A dry run before the plain run must change nothing it sees
+            result, performed, _ = _offline_result(
+                test_path, agenda, workers, dry_run = True
+            )
+            if result.error is not None or len(performed) != 0: return False
         if action == 'source' and len(sources) != 0:
             _write(rng.choice(sources), _fresh())
         elif action == 'header':
@@ -758,9 +838,13 @@ def _agenda_evaluate_offline_matches_clean_build(
             test_path = moved_path
 
         # While the trigger says fail, its task is out of date, so every run
-        # must run it and fail; otherwise every run must succeed
-        success, _ = _run_offline(test_path, agenda, workers)
-        if success == failing: return False
+        # that needs it must run it and fail; otherwise every run must succeed
+        success, _ = _run_offline(test_path, agenda, workers, **options)
+        needs_trigger = (
+            'targets' not in options
+            or trigger_task.desc in _needed(agenda, options['targets'])
+        )
+        if success == (failing and needs_trigger): return False
 
     # Once everything can succeed: a run succeeds, the next has nothing to
     # do, and the outputs are those of a clean build
@@ -2253,17 +2337,7 @@ def _agenda_evaluate_offline_targets(
         _norm(task.outputs[0]) if by_output else task.desc
         for task in targets
     ]
-    producer = {_norm(output): task for task in agenda.tasks for output in task.outputs}
-    needed: set[str] = set()
-    worklist = list(targets)
-    while len(worklist) != 0:
-        task = worklist.pop()
-        if task.desc in needed: continue
-        needed.add(task.desc)
-        worklist.extend(
-            producer[_norm(input)] for input in task.inputs
-            if _norm(input) in producer
-        )
+    needed = _needed(agenda, [task.desc for task in targets])
     test_path = _fixture_path()
     success, performed = _run_offline(test_path, agenda, workers, targets = names)
     if not success or set(performed) != needed: return False
@@ -2765,6 +2839,174 @@ def _agenda_evaluate_offline_explain(
     )
 
 
+@context(worker_counts, g.int_range(1, 3))
+@prop('A file rewritten right after a run is hashed again, even with its size and time kept', attempts=_attempts(10))
+def _agenda_evaluate_offline_racy_edit(workers: int, size: int) -> bool:
+    """A hash taken close to a file's modification time is not trusted,
+    since the file may change again within the same timestamp."""
+    test_path = _fixture_path()
+    source = test_path / 'src' / 'a.txt'
+    source.parent.mkdir()
+    source.write_text('a' * size)
+    script = [sys.executable, str(SUCCESS_SCRIPT), '-i', '$inputs', '-o', '$outputs']
+    agenda = ta.Agenda(procs = {'copy': script}, tasks = [ta.Task(
+        desc = 'Task copy', proc = 'copy',
+        args = {'inputs': ['src/a.txt'], 'outputs': ['out/a.txt']},
+        inputs = ['src/a.txt'], outputs = ['out/a.txt']
+    )])
+    success, performed = _run_offline(test_path, agenda, workers)
+    if not success or performed != ['Task copy']: return False
+    before = os.stat(source)
+    source.write_text('b' * size)
+    os.utime(source, ns = (before.st_atime_ns, before.st_mtime_ns))
+    success, performed = _run_offline(test_path, agenda, workers)
+    return success and performed == ['Task copy']
+
+
+@context(any_agendas, g.int_range(0, 20), g.int_range(1, 4))
+@prop('A dry run order holds every task to run once, after what it waits for, and leaves the schedule as it was', attempts=1000)
+def _schedule_dry_order(
+    agenda: ta.Agenda,
+    extra_count: int,
+    workers: int,
+    rng: random.Random
+) -> bool:
+    compiled, tasks = _random_graph(agenda, extra_count, rng)
+    for task in tasks:
+        task.set_valid(rng.choice([True, False]))
+        task.set_active(rng.random() < 0.8)
+    tgraph.propagate(tasks)
+    to_run = [task for task in tasks if not task.get_valid() and task.get_active()]
+    position = {task: index for index, task in enumerate(tasks)}
+    try: schedule = tsched.Schedule(tasks, workers)
+    except RuntimeError: return True
+    order = _stage_order(compiled, tasks)
+    members = {position[task] for task in to_run}
+    planned = schedule.order()
+    if sorted(map(id, planned)) != sorted(map(id, to_run)): return False
+    done: set[int] = set()
+    for task in planned:
+        if not (order[position[task]] & members) <= done: return False
+        done.add(position[task])
+    # Planning must not have used up the schedule it planned
+    events = _simulate(schedule, rng)
+    started = [task for kind, task in events if kind == 'start']
+    return sorted(map(id, started)) == sorted(map(id, to_run)) and schedule.finished()
+
+
+@context(evaluated_agendas, worker_counts, g.int_range(1, 5))
+@prop('Online mode after random edits leaves what a clean build makes, and nothing for offline mode to do', attempts=_attempts(10))
+def _agenda_evaluate_online_matches_clean_build(
+    agenda: ta.Agenda,
+    workers: int,
+    edit_count: int,
+    rng: random.Random
+) -> bool:
+    """Edits land while tasks run and while earlier edits settle; whatever
+    online mode ran and recorded must be what a clean build of the final
+    sources gives, and the cache must agree with the files."""
+    assume(len(agenda.tasks) != 0)
+    test_path = _fixture_path()
+    counter = iter(range(1000000))
+    sources: list[str] = []
+    for index, task in enumerate(agenda.tasks):
+        if not rng.choice([True, False]): continue
+        source = 'src/source_%d.txt' % index
+        task.inputs.append(source)
+        task.args['inputs'] = task.args['inputs'] + [source]
+        sources.append(source)
+    headers = ['hdr/header_%d.txt' % index for index in range(3)]
+    outputs = [output for task in agenda.tasks for output in task.outputs]
+
+    def _random_depend() -> tdep.Depend:
+        result: tdep.Depend = {}
+        for file in sources + outputs:
+            if rng.choice([True, False]): continue
+            result[file] = rng.sample(headers, rng.randint(1, len(headers)))
+        return result
+
+    def _write(root: Path, rel_path: str, text: str) -> None:
+        path = root / rel_path
+        path.parent.mkdir(parents = True, exist_ok = True)
+        path.write_text(text)
+
+    # The edits, planned up front so a clean build of the final sources
+    # can be made first: (pause, action, path, text or depend file)
+    edits: list[tuple[float, str, str, object]] = []
+    for _ in range(edit_count):
+        pause = rng.choice([0.0, 0.1, 0.2, 0.5, 1.0])
+        action = rng.choice(['source', 'header', 'depend', 'output'])
+        if action == 'source' and len(sources) != 0:
+            edits.append((pause, 'write', rng.choice(sources), 'content %d' % next(counter)))
+        elif action == 'header':
+            edits.append((pause, 'write', rng.choice(headers), 'content %d' % next(counter)))
+        elif action == 'depend':
+            edits.append((pause, 'depend', 'depend.yaml', _random_depend()))
+        else:
+            edits.append((pause, 'delete', _norm(rng.choice(outputs)), None))
+
+    def _apply(root: Path, kind: str, rel_path: str, value: object) -> None:
+        if kind == 'write':
+            assert isinstance(value, str)
+            _write(root, rel_path, value)
+        elif kind == 'depend':
+            assert isinstance(value, dict)
+            tdep.store(root / 'depend.yaml', value)
+        else:
+            (root / rel_path).unlink(missing_ok = True)
+
+    final_path = _fixture_path()
+    initial_depend = _random_depend()
+    for root in [test_path, final_path]:
+        for file in sources + headers: _write(root, file, 'initial')
+        tdep.store(root / 'depend.yaml', initial_depend)
+    for _, kind, rel_path, value in edits:
+        if kind != 'delete': _apply(final_path, kind, rel_path, value)
+    clean_path = _clean_build(final_path, agenda, workers)
+    if clean_path is None: return False
+
+    def _matches() -> bool:
+        try:
+            return all(
+                (test_path / _norm(output)).read_text()
+                == (clean_path / _norm(output)).read_text()
+                for output in outputs
+            )
+        except OSError:
+            return False
+
+    agenda_path = test_path / 'agenda.yaml'
+    ta.store(agenda_path, agenda)
+    with _quiet(), _executor(False):
+        evaluator = tapi.online(test_path, agenda_path, worker_count = workers)
+        if evaluator is None: return False
+        runner = Thread(target = evaluator.start, daemon = True)
+        runner.start()
+        try:
+            if not _wait_for(lambda: all(
+                (test_path / _norm(output)).is_file() for output in outputs
+            )): return False
+            for pause, kind, rel_path, value in edits:
+                time.sleep(pause)
+                _apply(test_path, kind, rel_path, value)
+            # Stop once it is idle: the outputs match and no task runs, for
+            # longer than changes take to settle. A task whose output is
+            # written but not yet recorded is cancelled by stop(), and runs
+            # again next time.
+            idle_since = [time.monotonic()]
+            def _idle() -> bool:
+                if not _matches() or len(evaluator.runs()) != 0:
+                    idle_since[0] = time.monotonic()
+                return time.monotonic() - idle_since[0] > 1.0
+            matched = _wait_for(_idle, 30.0)
+        finally:
+            evaluator.stop()
+            runner.join(timeout = 10)
+    if not matched or runner.is_alive(): return False
+    success, performed = _run_offline(test_path, agenda, workers)
+    return success and len(performed) == 0
+
+
 ###############################################################################
 # Specification
 ###############################################################################
@@ -2851,4 +3093,8 @@ spec = conj(
     _agenda_evaluate_offline_depfile,
     _depfile_parse,
     _agenda_evaluate_offline_explain,
+    _agenda_hash_ignores_scheduling,
+    _agenda_evaluate_offline_racy_edit,
+    _schedule_dry_order,
+    _agenda_evaluate_online_matches_clean_build,
 )
