@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### Upgrading
+
+The cache moves to format 3; a cache written by 0.5.0 is migrated, so upgrading reruns nothing (every input is hashed once). A cache written by a newer tickle is refused and left alone. A task's output now goes to a log file in `tickle-logs` instead of being printed. `api.offline` returns a `Result`, which is true when the run succeeded, so `if offline(...)` keeps working; code comparing the result with `True` must use `bool(...)`.
+
+### Added
+
+- Tasks start as soon as the tasks they read from, and those of the earlier stages of their flows, have finished, instead of in batches that waited for their slowest task. When several tasks are ready, the one heading the longest chain of work starts first, judged by the durations recorded last time.
+- `--keep-going` (`keep_going` in the API): after a task fails, every task that does not read from it still runs. Online mode keeps going by default (`--stop-on-failure` turns it off).
+- Targets: `tickle offline out/final.mp4` runs only the tasks a target needs, given as task descriptions or output files.
+- `--dry-run` prints the tasks that would run, without running them.
+- Pools (`pools` in the agenda, `pool` on a task) limit how many tasks of a kind run at once.
+- `timeout` stops a task that runs too long and fails it; `retries` runs a failing task again.
+- `always: true` makes a task without outputs run on every run.
+- Each task's output goes to a log file of its own in `tickle-logs` (`--log-dir`); a failure prints the end of it and its path.
+- A lock keeps two runs out of one project; the second fails at once, naming the first.
+- An input whose size and modification time are unchanged is not hashed again, so a run with nothing to do no longer reads every input in full.
+- `api.offline` takes an `Agenda` object as well as a path, and every path argument after the target directory is optional; the options are keyword-only. The package ships type information.
+
+### Changed
+
+- Tasks run in a process group of their own. Interrupting tickle, with Ctrl-C or now also SIGTERM (exit code 143), or a timeout, stops a task's processes: tickle asks them to end and kills them after five seconds.
+- Online mode applies a change without waiting for running tasks: a running task whose definition and inputs did not change carries on, and one whose did is stopped and started again. Changes are applied once they settle for 0.3 seconds. Stopping online mode stops its running tasks.
+- A task's `flows` field is optional, and so is every agenda section.
+- A succeeding task's output, stderr included, goes to its log instead of being printed.
+
+### Fixed
+
+- Online mode stopped noticing changes to files in a folder that was deleted and created again, or replaced by a rename.
+- A change made between creating an evaluator and starting it was missed.
+
+## 0.5.0
+
 ## 0.5.0
 
 ### Upgrading

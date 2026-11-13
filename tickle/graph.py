@@ -1,8 +1,12 @@
+# Annotations name Task, whose module imports this one
+from __future__ import annotations
+
 # External module dependencies
+from typing import TYPE_CHECKING
 from collections import deque
 
-# Internal module dependencies
-from .evaluate import Task, Program
+if TYPE_CHECKING:
+    from .evaluate import Task
 
 ###############################################################################
 # Functions
@@ -35,7 +39,7 @@ def has_cycle(nodes : list[Task]) -> bool:
             stack.append(list(node_dep.get_deps()))
     return False
 
-Graph = list[Task]
+Graph = list['Task']
 
 def get_leafs(graph : Graph):
     return list(filter(lambda node: len(node.get_deps()) == 0, graph))
@@ -149,27 +153,6 @@ def _order(tasks : list[Task]) -> list[list[int]]:
 
 def check_stages(graph : Graph):
     """Raise RuntimeError if the dependencies of the tasks form a cycle with
-    the stage order of their flows. compile only sees the tasks it is about
-    to run, so this checks the whole graph, whatever is up to date."""
+    the stage order of their flows. A schedule only sees the tasks it is
+    about to run, so this checks the whole graph, whatever is up to date."""
     _order(graph)
-
-def compile(graph : Graph) -> Program:
-    if has_cycle(graph):
-        raise RuntimeError('Cycle detected in agenda!')
-
-    # Every out-of-date task that can run. Propagation has already made the
-    # tasks after an out-of-date task out of date, so no search is needed;
-    # searching down from the tasks nothing depends on stopped at skipped
-    # tasks and missed the tasks only they needed.
-    tasks : list[Task] = [
-        task for task in graph
-        if not task.get_valid() and task.get_active()
-    ]
-
-    # Each batch holds the tasks whose dependencies all lie in earlier
-    # batches; one sequence per task
-    program : Program = []
-    for level in _order(tasks):
-        batch = [ [tasks[uid]] for uid in level ]
-        if len(batch) != 0: program.append(batch)
-    return program

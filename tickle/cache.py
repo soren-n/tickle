@@ -78,6 +78,12 @@ class Cache:
             if time.monotonic() - self._written < _WRITE_INTERVAL: return
             self._store()
 
+    def mark(self):
+        """Record that the contents changed, to be written out by a later
+        call to changed() or flush(); for changes too small to be worth a
+        write of their own."""
+        with self.lock: self._dirty = True
+
     def flush(self):
         """Write out any changes not yet written."""
         with self.lock:

@@ -1,6 +1,7 @@
 # External module dependencies
 from collections.abc import Iterator
 from contextlib import contextmanager, redirect_stdout
+import importlib.util
 from pathlib import Path
 from threading import Lock, Thread
 import io
@@ -26,6 +27,8 @@ import tickle.api as tapi
 import tickle.depend as tdep
 import tickle.evaluate as tev
 import tickle.graph as tgraph
+import tickle.process as tproc
+import tickle.schedule as tsched
 
 # Internal module dependencies
 from ._agenda import (
@@ -62,6 +65,12 @@ ATTEMPT_SCALE = float(os.environ.get('TICKLE_TEST_ATTEMPT_SCALE', '1'))
 def _attempts(count: int) -> int:
     return max(1, round(count * ATTEMPT_SCALE))
 
+# Most properties that evaluate agendas run the success script in this
+# process instead of starting one per task, which is much faster; setting
+# TICKLE_TEST_PROCESSES=1 makes them all start real processes, as the
+# nightly CI run does.
+PROCESSES = os.environ.get('TICKLE_TEST_PROCESSES', '0') == '1'
+
 ###############################################################################
 # Test helpers
 ###############################################################################
@@ -97,26 +106,78 @@ def _quiet() -> Iterator[None]:
         logging.disable(logging.NOTSET)
 
 
-def _run_offline(
+def _load_success():
+    spec = importlib.util.spec_from_file_location('_success', SUCCESS_SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+_success = _load_success()
+_RealProcess = tproc.Process
+
+
+class _InProcess:
+    """Stands in for tickle.process.Process: runs the success script in
+    this process, and any other command as a real process."""
+
+    def __init__(self, command: list[str], cwd: Path, log_path: Path) -> None:
+        self._real: tproc.Process | None = None
+        if command[:2] != [sys.executable, str(SUCCESS_SCRIPT)]:
+            self._real = _RealProcess(command, cwd, log_path)
+            return
+        start = time.monotonic()
+        with log_path.open('w') as log_file:
+            try: self._code = _success.run(command[2:], cwd, log_file)
+            except BaseException as error:
+                log_file.write('%s: %s\n' % (type(error).__name__, error))
+                self._code = 2
+        self._duration = time.monotonic() - start
+
+    def wait(self, timeout: float = 0.0) -> tproc.Outcome:
+        if self._real is not None: return self._real.wait(timeout)
+        return tproc.Outcome(self._code, self._duration)
+
+    def stop(self) -> None:
+        if self._real is not None: self._real.stop()
+
+
+@contextmanager
+def _executor(processes: bool) -> Iterator[None]:
+    """Run the success script in-process inside the block, unless real
+    processes are asked for."""
+    if processes or PROCESSES:
+        yield
+        return
+    saved = tapi.Process
+    tapi.Process = _InProcess  # type: ignore
+    try: yield
+    finally: tapi.Process = saved
+
+
+def _offline_result(
     test_path: Path,
     agenda: ta.Agenda | None = None,
-    workers: int | None = None
-) -> tuple[bool, list[str]]:
+    workers: int | None = None,
+    processes: bool = False,
+    **options
+) -> tuple[tapi.Result, list[str], str]:
     """Run offline mode, storing the agenda first if one is given; returns
-    whether it succeeded and the descriptions of the tasks it ran, in the
-    order they started."""
+    the result, the descriptions of the tasks it ran in the order they
+    started, and what it printed."""
     agenda_path = test_path / 'agenda.yaml'
     if agenda is not None: ta.store(agenda_path, agenda)
     output = io.StringIO()
     logging.disable(logging.CRITICAL)
     try:
-        with redirect_stdout(output):
-            success = tapi.offline(
+        with redirect_stdout(output), _executor(processes):
+            result = tapi.offline(
                 test_path,
                 agenda_path,
                 test_path / 'depend.yaml',
                 test_path / 'tickle.cache',
-                tapi.default_worker_count() if workers is None else workers
+                tapi.default_worker_count() if workers is None else workers,
+                **options
             )
     finally:
         logging.disable(logging.NOTSET)
@@ -125,7 +186,22 @@ def _run_offline(
         for line in output.getvalue().splitlines()
         if line.startswith('[tickle] Task ')
     ]
-    return success, performed
+    return result, performed, output.getvalue()
+
+
+def _run_offline(
+    test_path: Path,
+    agenda: ta.Agenda | None = None,
+    workers: int | None = None,
+    processes: bool = False,
+    **options
+) -> tuple[bool, list[str]]:
+    """Run offline mode; returns whether it succeeded and the tasks it
+    ran, in the order they started."""
+    result, performed, _ = _offline_result(
+        test_path, agenda, workers, processes, **options
+    )
+    return bool(result), performed
 
 
 def _offline(test_path: Path, agenda: ta.Agenda) -> bool:
@@ -276,8 +352,9 @@ def _agenda_command_expansion(
 @context(evaluated_agendas)
 @prop('Offline evaluation succeeds and creates every output', attempts=_attempts(100))
 def _agenda_evaluate_offline(agenda: ta.Agenda) -> bool:
+    # Real processes, as everything after the first run is in-process
     test_path = _fixture_path()
-    if not _offline(test_path, agenda): return False
+    if not _run_offline(test_path, agenda, processes = True)[0]: return False
     return all(path.is_file() for path in _outputs(test_path, agenda))
 
 
@@ -749,105 +826,10 @@ def _agenda_evaluate_offline_depend_order(consumer_count: int) -> bool:
     return success and performed[:1] == ['Task generate']
 
 
-def _program_order(agenda: ta.Agenda) -> dict[str, tuple[int, int, int]] | None:
-    """Compile the agenda's task graph into a program without running it, and
-    return for each task its (batch, sequence, position) in the program."""
-    _, tasks = _task_graph(agenda)
-    for task in tasks:
-        task.set_valid(False)
-        task.set_active(True)
-    result: dict[str, tuple[int, int, int]] = {}
-    for batch_index, batch in enumerate(tgraph.compile(tasks)):
-        for sequence_index, sequence in enumerate(batch):
-            for position, task in enumerate(sequence):
-                desc = task.description
-                if desc in result: return None
-                result[desc] = (batch_index, sequence_index, position)
-    return result
 
 
-@context(any_agendas)
-@prop('Compiled programs run every task once, after its dependencies and earlier stages', attempts=1000)
-def _program_order_respected(agenda: ta.Agenda) -> bool:
-    order = _program_order(agenda)
-    if order is None or len(order) != len(agenda.tasks): return False
-
-    def _before(first: str, second: str) -> bool:
-        # A task finishes before another starts if its batch is earlier, or
-        # if both run in order in the same sequence
-        batch_a, sequence_a, position_a = order[first]
-        batch_b, sequence_b, position_b = order[second]
-        if batch_a != batch_b: return batch_a < batch_b
-        return sequence_a == sequence_b and position_a < position_b
-
-    producer = {
-        _norm(output): task.desc
-        for task in agenda.tasks
-        for output in task.outputs
-    }
-    for task in agenda.tasks:
-        for input in map(_norm, task.inputs):
-            if input not in producer: continue
-            if not _before(producer[input], task.desc): return False
-    stage_of = {
-        (flow, proc): index
-        for flow, stages in agenda.flows.items()
-        for index, stage in enumerate(stages)
-        for proc in stage
-    }
-    for first in agenda.tasks:
-        for second in agenda.tasks:
-            for flow in set(first.flows) & set(second.flows):
-                if stage_of[(flow, first.proc)] >= stage_of[(flow, second.proc)]:
-                    continue
-                if not _before(first.desc, second.desc): return False
-    return True
 
 
-@context(g.int_range(2, 4), g.int_range(1, 3))
-@prop('A task error is reported without cancelling the next program', attempts=_attempts(10))
-def _evaluator_error_keeps_next_program(
-    failure_count: int,
-    task_count: int
-) -> bool:
-    reported: list[str] = []
-    performed: list[int] = []
-
-    class _Evaluator(tev.Evaluator):
-        def on_task_error(self, error: tev.TaskError) -> None:
-            reported.append(error.description)
-
-    def _fail(index: int) -> None:
-        raise tev.TaskError('Failure %d' % index, 'failed')
-
-    evaluator = _Evaluator(4)
-    runner = Thread(target = evaluator.start, daemon = True)
-    runner.start()
-    try:
-        failing = [
-            tev.Task({'flow': 0}, (lambda index = index: _fail(index)))
-            for index in range(failure_count)
-        ]
-        evaluator.pause()
-        evaluator.reprogram(tgraph.compile(failing))
-        evaluator.resume()
-        if not _wait_for(lambda: len(reported) != 0, 5.0): return False
-
-        # A new program right after the first failure is reported, as a file
-        # save would cause; the other failures belong to the old program
-        working = [
-            tev.Task({'flow': 0}, (lambda index = index: performed.append(index)))
-            for index in range(task_count)
-        ]
-        evaluator.pause()
-        evaluator.reprogram(tgraph.compile(working))
-        evaluator.resume()
-        if not _wait_for(lambda: len(performed) == task_count, 5.0):
-            return False
-        return _wait_for(lambda: len(reported) == failure_count, 5.0)
-    finally:
-        evaluator.stop()
-        runner.join(timeout = 10)
 
 
 def _wait_for(condition, timeout: float = 20.0) -> bool:
@@ -990,7 +972,7 @@ def _task_graph(agenda: ta.Agenda) -> tuple[list[ta.CompiledTask], list[tev.Task
     """The agenda's task graph, with work that does nothing."""
     compiled = ta.compile(Path('/target'), agenda)
     tasks = [
-        tev.Task(task.flows, lambda: None, description = task.description)
+        tev.Task(task.flows, lambda run: None, description = task.description)
         for task in compiled
     ]
     producer = {
@@ -1004,77 +986,8 @@ def _task_graph(agenda: ta.Agenda) -> tuple[list[ta.CompiledTask], list[tev.Task
     return compiled, tasks
 
 
-@context(any_agendas)
-@prop('Compiled programs run every out-of-date task that can run, also those only skipped tasks need', attempts=1000)
-def _program_runs_runnable_tasks(agenda: ta.Agenda, rng: random.Random) -> bool:
-    # Online mode compiles the graph without the task that offline mode adds
-    # to end the run, so nothing above a skipped task leads to its producers
-    _, tasks = _task_graph(agenda)
-    for task in tasks:
-        task.set_valid(rng.choice([True, False]))
-        task.set_active(rng.random() < 0.8)
-    tgraph.propagate(tasks)
-    expected = {
-        id(task) for task in tasks
-        if not task.get_valid() and task.get_active()
-    }
-    scheduled = [
-        id(task)
-        for batch in tgraph.compile(tasks)
-        for sequence in batch
-        for task in sequence
-    ]
-    return len(scheduled) == len(set(scheduled)) and set(scheduled) == expected
 
 
-@context(any_agendas, g.int_range(0, 20))
-@prop('Compiled programs keep every order with dependencies beyond the inputs', attempts=1000)
-def _program_order_extra_deps(
-    agenda: ta.Agenda,
-    extra_count: int,
-    rng: random.Random
-) -> bool:
-    # Depend entries add dependencies that inputs alone would not, also
-    # between tasks whose stages in their other flows disagree with them
-    compiled, tasks = _task_graph(agenda)
-    assume(len(tasks) >= 2)
-    for _ in range(extra_count):
-        dst, src = rng.sample(tasks, 2)
-        if dst in _upstream(src): continue
-        try: dst.add_dependency(src)
-        except RuntimeError: continue
-    for task in tasks:
-        task.set_valid(False)
-        task.set_active(True)
-
-    # Dependencies and stage order together may form a cycle, which no
-    # program can follow; compile must then refuse rather than drop tasks
-    order: dict[int, set[int]] = {index: set() for index in range(len(tasks))}
-    for index, task in enumerate(tasks):
-        order[index].update(tasks.index(dep) for dep in task.get_deps())
-        for other, other_data in enumerate(compiled):
-            for flow, stage in compiled[index].flows.items():
-                if other_data.flows.get(flow, stage) < stage: order[index].add(other)
-    cyclic = _has_cycle(order)
-    try: program = tgraph.compile(tasks)
-    except RuntimeError: return cyclic
-    if cyclic: return False
-    position: dict[int, tuple[int, int]] = {}
-    for batch_index, batch in enumerate(program):
-        for sequence in batch:
-            for index, task in enumerate(sequence):
-                if id(task) in position: return False
-                position[id(task)] = (batch_index, index)
-    if len(position) != len(tasks): return False
-    for task in tasks:
-        for dep in task.get_deps():
-            if position[id(dep)] >= position[id(task)]: return False
-    for first, first_data in zip(tasks, compiled, strict = True):
-        for second, second_data in zip(tasks, compiled, strict = True):
-            for flow in set(first_data.flows) & set(second_data.flows):
-                if first_data.flows[flow] >= second_data.flows[flow]: continue
-                if position[id(first)] >= position[id(second)]: return False
-    return True
 
 
 def _upstream(task: tev.Task) -> set[tev.Task]:
@@ -1095,7 +1008,7 @@ def _wide_graph(width: int, stages: int) -> list[tev.Task]:
     tasks: list[tev.Task] = []
     previous: list[tev.Task] = []
     for stage in range(stages):
-        current = [tev.Task({'flow': stage}, lambda: None) for _ in range(width)]
+        current = [tev.Task({'flow': stage}, lambda run: None) for _ in range(width)]
         for task, dep in zip(current, previous, strict = False):
             task.add_dependency(dep)
         tasks += current
@@ -1106,142 +1019,466 @@ def _wide_graph(width: int, stages: int) -> list[tev.Task]:
     return tasks
 
 
-def _compile_time(width: int, stages: int) -> tuple[float, bool]:
-    """The best of three times to compile a wide graph with a task that
-    depends on every other, as offline mode adds, and whether the program
-    holds every task."""
-    best = float('inf')
-    complete = True
-    for _ in range(3):
-        tasks = _wide_graph(width, stages)
-        hub = tev.Task({'': 0}, lambda: None, True)
-        hub.add_dependencies(tasks)
-        tasks.append(hub)
-        start = time.monotonic()
-        program = tgraph.compile(tasks)
-        best = min(best, time.monotonic() - start)
-        count = sum(len(sequence) for batch in program for sequence in batch)
-        complete = complete and count == len(tasks)
-    return best, complete
 
 
-@context(g.int_range(8000, 9000), g.int_range(2, 2))
-@prop('Compiling a wide program takes time linear in its size', attempts=3)
-def _program_compile_wide(width: int, stages: int) -> bool:
-    # Batches used to be joined by an edge from every task of one batch to
-    # every task of the next, so two stages of 4000 tasks took minutes and
-    # gigabytes to compile; and the cycle check was quadratic in the number
-    # of dependencies of one task (a ratio of about 10 here, against 4).
-    # Comparing four times the tasks keeps the bound independent of the
-    # machine.
-    small, small_complete = _compile_time(width, stages)
-    large, large_complete = _compile_time(4 * width, stages)
-    return small_complete and large_complete and large < 7 * max(small, 0.01)
 
-@context(any_agendas)
-@prop('Compiled programs put each task in the earliest batch its dependencies and stages allow', attempts=1000)
-def _program_batches_earliest(agenda: ta.Agenda) -> bool:
-    # A task waiting for a batch it does not need costs wall time: with the
-    # batch barrier, it waits for the slowest task of every batch before it
+
+
+
+def _random_graph(
+    agenda: ta.Agenda,
+    extra_count: int,
+    rng: random.Random
+) -> tuple[list[ta.CompiledTask], list[tev.Task]]:
+    """The agenda's task graph with some extra dependencies, as depend
+    entries add, also between tasks whose stages in other flows disagree."""
     compiled, tasks = _task_graph(agenda)
+    if len(tasks) < 2: return compiled, tasks
+    for _ in range(extra_count):
+        dst, src = rng.sample(tasks, 2)
+        if dst in _upstream(src): continue
+        try: dst.add_dependency(src)
+        except RuntimeError: continue
+    return compiled, tasks
+
+
+def _stage_order(
+    compiled: list[ta.CompiledTask],
+    tasks: list[tev.Task]
+) -> dict[int, set[int]]:
+    """For each task, the tasks that must finish before it starts: its
+    dependencies and the tasks of earlier stages in the flows it shares."""
+    order: dict[int, set[int]] = {index: set() for index in range(len(tasks))}
+    position = {task: index for index, task in enumerate(tasks)}
+    for index, task in enumerate(tasks):
+        order[index].update(position[dep] for dep in task.get_deps())
+        for other, other_data in enumerate(compiled):
+            for flow, stage in compiled[index].flows.items():
+                if other_data.flows.get(flow, stage) < stage: order[index].add(other)
+    return order
+
+
+def _simulate(
+    schedule: tsched.Schedule,
+    rng: random.Random,
+    fail: set[tev.Task] | None = None,
+    fail_times: dict[tev.Task, int] | None = None
+) -> list[tuple[str, tev.Task]]:
+    """Drive a schedule as workers would, finishing running tasks in a
+    random order; fail holds tasks that always fail, and fail_times how
+    often other tasks fail before they succeed. Returns the start and
+    finish events, and checks the worker and pool limits all along."""
+    events: list[tuple[str, tev.Task]] = []
+    running: list[tev.Task] = []
+    failures: dict[tev.Task, int] = {}
+    while True:
+        while True:
+            task = schedule.next()
+            if task is None: break
+            running.append(task)
+            events.append(('start', task))
+        if len(running) > schedule._worker_count:
+            raise AssertionError('more tasks running than workers')
+        for pool, depth in schedule._pools.items():
+            if sum(1 for task in running if task.get_pool() == pool) > depth:
+                raise AssertionError('more tasks of pool %s than it allows' % pool)
+        if len(running) == 0: break
+        task = running.pop(rng.randrange(len(running)))
+        failed = task in (fail or set())
+        if not failed and fail_times is not None:
+            failures[task] = failures.get(task, 0) + 1
+            failed = failures[task] <= fail_times.get(task, 0)
+        schedule.finish(task, not failed)
+        events.append(('fail' if failed else 'done', task))
+    return events
+
+
+@context(any_agendas, g.int_range(0, 20), g.int_range(1, 4))
+@prop('Schedules start every task to run once, after its dependencies and earlier stages', attempts=1000)
+def _schedule_order(
+    agenda: ta.Agenda,
+    extra_count: int,
+    workers: int,
+    rng: random.Random
+) -> bool:
+    compiled, tasks = _random_graph(agenda, extra_count, rng)
+    for task in tasks:
+        task.set_valid(rng.choice([True, False]))
+        task.set_active(rng.random() < 0.8)
+    tgraph.propagate(tasks)
+    to_run = [task for task in tasks if not task.get_valid() and task.get_active()]
+    position = {task: index for index, task in enumerate(tasks)}
+
+    # Dependencies and stage order together may form a cycle, which no
+    # schedule can follow; it must then refuse rather than drop tasks
+    order = _stage_order(compiled, tasks)
+    members = {position[task] for task in to_run}
+    cyclic = _has_cycle({
+        index: order[index] & members for index in members
+    })
+    try: schedule = tsched.Schedule(tasks, workers)
+    except RuntimeError: return cyclic
+    if cyclic: return False
+
+    events = _simulate(schedule, rng)
+    started = [task for kind, task in events if kind == 'start']
+    if sorted(map(id, started)) != sorted(map(id, to_run)): return False
+    finished: set[int] = set()
+    for kind, task in events:
+        if kind == 'start':
+            index = position[task]
+            if not (order[index] & members) <= finished: return False
+        else:
+            finished.add(position[task])
+    return schedule.finished()
+
+
+@context(any_agendas, g.int_range(1, 6), g.int_range(1, 3), g.int_range(1, 3))
+@prop('Schedules keep the worker count and the depth of every pool', attempts=500)
+def _schedule_pools(
+    agenda: ta.Agenda,
+    workers: int,
+    pool_count: int,
+    depth: int,
+    rng: random.Random
+) -> bool:
+    pools = {'pool_%d' % index: rng.randint(1, depth) for index in range(pool_count)}
+    compiled = ta.compile(Path('/target'), agenda)
+    tasks = [
+        tev.Task(
+            task.flows, lambda run: None, description = task.description,
+            pool = rng.choice([''] + sorted(pools))
+        )
+        for task in compiled
+    ]
+    producer = {
+        output: tasks[index]
+        for index, task in enumerate(compiled)
+        for output in task.outputs
+    }
+    for index, task in enumerate(compiled):
+        for input in task.inputs:
+            if input in producer: tasks[index].add_dependency(producer[input])
     for task in tasks:
         task.set_valid(False)
         task.set_active(True)
-    batch_of: dict[int, int] = {}
-    for batch_index, batch in enumerate(tgraph.compile(tasks)):
-        for sequence in batch:
-            for task in sequence: batch_of[id(task)] = batch_index
-
-    # A task's batch is one more than that of its latest dependency or of
-    # the latest task of an earlier stage in a flow it shares
-    before: dict[int, set[int]] = {}
-    for index, task in enumerate(compiled):
-        before[index] = {
-            other for other, dep in enumerate(tasks)
-            if dep in tasks[index].get_deps()
-        }
-        for other, other_task in enumerate(compiled):
-            for flow, stage in task.flows.items():
-                if other_task.flows.get(flow, stage) < stage:
-                    before[index].add(other)
-    expected: dict[int, int] = {}
-
-    def _level(index: int) -> int:
-        if index not in expected:
-            expected[index] = max(
-                [-1] + [_level(other) for other in before[index]]
-            ) + 1
-        return expected[index]
-
-    return all(
-        batch_of.get(id(task)) == _level(index)
-        for index, task in enumerate(tasks)
+    schedule = tsched.Schedule(tasks, workers, pools)
+    try: events = _simulate(schedule, rng)
+    except AssertionError: return False
+    return (
+        len([kind for kind, _ in events if kind == 'start']) == len(tasks)
+        and schedule.finished()
     )
 
 
+@context(any_agendas, g.int_range(1, 4))
+@prop('With keep going, a failure blocks exactly the tasks that read from it', attempts=500)
+def _schedule_keep_going(
+    agenda: ta.Agenda,
+    workers: int,
+    rng: random.Random
+) -> bool:
+    compiled, tasks = _task_graph(agenda)
+    assume(len(tasks) != 0)
+    for task in tasks:
+        task.set_valid(False)
+        task.set_active(True)
+    failing = set(rng.sample(tasks, rng.randint(1, min(3, len(tasks)))))
+    schedule = tsched.Schedule(tasks, workers, keep_going = True)
+    events = _simulate(schedule, rng, fail = failing)
+
+    # Downstream of a failure through dependencies, not through stages; a
+    # failing task downstream of another never runs, so it is blocked too
+    blocked: set[tev.Task] = set()
+    worklist = list(failing)
+    while len(worklist) != 0:
+        for ref in worklist.pop().get_refs():
+            if ref in blocked: continue
+            blocked.add(ref)
+            worklist.append(ref)
+    started = {task for kind, task in events if kind == 'start'}
+    for task in tasks:
+        state = schedule.state[task]
+        if task in blocked:
+            if task in started or state != tsched.BLOCKED: return False
+        elif task in failing:
+            if state != tsched.FAILED: return False
+        elif state != tsched.DONE:
+            return False
+    return schedule.finished()
+
+
+@context(any_agendas, g.int_range(1, 4))
+@prop('Without keep going, nothing starts after a failure', attempts=500)
+def _schedule_stop_on_failure(
+    agenda: ta.Agenda,
+    workers: int,
+    rng: random.Random
+) -> bool:
+    _, tasks = _task_graph(agenda)
+    assume(len(tasks) != 0)
+    for task in tasks:
+        task.set_valid(False)
+        task.set_active(True)
+    failing = rng.choice(tasks)
+    schedule = tsched.Schedule(tasks, workers)
+    events = _simulate(schedule, rng, fail = {failing})
+    kinds = [kind for kind, _ in events]
+    if 'fail' not in kinds: return False
+    first_failure = kinds.index('fail')
+    return 'start' not in kinds[first_failure:] and schedule.finished()
+
+
+@context(g.int_range(0, 3), g.int_range(0, 4), g.int_range(1, 3))
+@prop('Schedules run a failing task again as often as its retries allow', attempts=200)
+def _schedule_retries(
+    retries: int,
+    failures: int,
+    workers: int,
+    rng: random.Random
+) -> bool:
+    task = tev.Task({}, lambda run: None, description = 'Task', retries = retries)
+    after = tev.Task({}, lambda run: None, description = 'After')
+    after.add_dependency(task)
+    for item in [task, after]:
+        item.set_valid(False)
+        item.set_active(True)
+    schedule = tsched.Schedule([task, after], workers)
+    events = _simulate(schedule, rng, fail_times = {task: failures})
+    starts = [item for kind, item in events if kind == 'start' and item is task]
+    if failures <= retries:
+        return (
+            len(starts) == failures + 1
+            and schedule.state[task] == tsched.DONE
+            and schedule.state[after] == tsched.DONE
+        )
+    return (
+        len(starts) == retries + 1
+        and schedule.state[task] == tsched.FAILED
+        and after not in {item for kind, item in events if kind == 'start'}
+    )
+
+
+@context(g.int_range(2, 6), g.int_range(1, 5))
+@prop('One worker starts the ready task with the longest chain of durations first', attempts=500)
+def _schedule_priority(
+    chain_count: int,
+    max_length: int,
+    rng: random.Random
+) -> bool:
+    # Independent chains of tasks with random durations; with one worker
+    # the first task to start heads the chain with the most work left
+    tasks: list[tev.Task] = []
+    totals: dict[tev.Task, float] = {}
+    for chain in range(chain_count):
+        previous: tev.Task | None = None
+        chain_tasks: list[tev.Task] = []
+        for index in range(rng.randint(1, max_length)):
+            task = tev.Task(
+                {}, lambda run: None,
+                description = 'Task %d.%d' % (chain, index),
+                weight = rng.choice([0.5, 1.0, 2.0, 7.0])
+            )
+            if previous is not None: task.add_dependency(previous)
+            previous = task
+            chain_tasks.append(task)
+        total = sum(task.get_weight() for task in chain_tasks)
+        totals[chain_tasks[0]] = total
+        tasks += chain_tasks
+    for task in tasks:
+        task.set_valid(False)
+        task.set_active(True)
+    first = tsched.Schedule(tasks, 1).next()
+    return first is not None and totals.get(first) == max(totals.values())
+
+
+def _scale_time(width: int) -> tuple[float, bool]:
+    """The best of three times to propagate and schedule a wide graph, and
+    whether the schedule holds every task."""
+    best = float('inf')
+    complete = True
+    for _ in range(3):
+        tasks = _wide_graph(width, 2)
+        start = time.monotonic()
+        tgraph.propagate(tasks)
+        schedule = tsched.Schedule(tasks, 8)
+        best = min(best, time.monotonic() - start)
+        complete = complete and len(schedule.tasks) == len(tasks)
+    return best, complete
+
+
+@context(g.int_range(8000, 9000))
+@prop('Scheduling a wide graph takes time linear in its size', attempts=3)
+def _schedule_scale(width: int) -> bool:
+    # Batches used to be joined by an edge from every task of one batch to
+    # every task of the next, so two stages of 4000 tasks took minutes and
+    # gigabytes; and the cycle check was quadratic in the dependencies of
+    # one task. Comparing four times the tasks keeps the bound independent
+    # of the machine.
+    small, small_complete = _scale_time(width)
+    large, large_complete = _scale_time(4 * width)
+    return small_complete and large_complete and large < 7 * max(small, 0.01)
+
+
+###############################################################################
+# The evaluator, with work that starts no processes
+###############################################################################
+def _install(evaluator: tev.Evaluator, tasks: list[tev.Task], keep=None) -> None:
+    for task in tasks:
+        task.set_valid(False)
+        task.set_active(True)
+    evaluator.install(evaluator.make_schedule(tasks), keep)
+
+
+def _sleep(run: tev.Run, seconds: float) -> None:
+    """Sleep as a task would run, ending early when the run is cancelled."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline and not run.cancelled():
+        time.sleep(0.01)
+
+
+@contextmanager
+def _running(evaluator: tev.Evaluator) -> Iterator[Thread]:
+    runner = Thread(target = evaluator.start, daemon = True)
+    runner.start()
+    try: yield runner
+    finally:
+        evaluator.stop(cancel = True)
+        runner.join(timeout = 10)
+
+
+@context(g.int_range(1, 3))
+@prop('A task starts as soon as what it waits for has finished', attempts=_attempts(10))
+def _evaluator_starts_when_ready(chain_length: int) -> bool:
+    # A slow task next to a chain of fast ones: the chain must not wait
+    # for the slow task, as it did with batches
+    done: list[str] = []
+    slow = tev.Task({}, lambda run: (_sleep(run, 1.0), done.append('slow')), description = 'slow')
+    chain: list[tev.Task] = []
+    for index in range(chain_length):
+        task = tev.Task(
+            {}, (lambda run, index = index: done.append('chain %d' % index)),
+            description = 'chain %d' % index
+        )
+        if len(chain) != 0: task.add_dependency(chain[-1])
+        chain.append(task)
+    evaluator = tev.Evaluator(2)
+    _install(evaluator, [slow] + chain)
+    with _running(evaluator) as runner:
+        if not _wait_for(lambda: len(done) == chain_length + 1, 5.0): return False
+    return not runner.is_alive() and done[-1] == 'slow'
+
+
+@context(g.int_range(1, 3), g.int_range(2, 4))
+@prop('Stopping the evaluator starts no more tasks', attempts=_attempts(10))
+def _evaluator_stop_starts_nothing(workers: int, factor: int) -> bool:
+    started: list[int] = []
+    lock = Lock()
+
+    def _work(run: tev.Run, index: int) -> None:
+        with lock: started.append(index)
+        _sleep(run, 0.3)
+
+    evaluator = tev.Evaluator(workers)
+    _install(evaluator, [
+        tev.Task({'flow': 0}, (lambda run, index = index: _work(run, index)))
+        for index in range(workers * factor)
+    ])
+    runner = Thread(target = evaluator.start, daemon = True)
+    runner.start()
+    if not _wait_for(lambda: len(started) != 0, 5.0): return False
+    time.sleep(0.05)
+    evaluator.stop()
+    runner.join(timeout = 10)
+    return not runner.is_alive() and len(started) <= workers
+
+
+@prop('Stopping the evaluator before it starts ends it at once', attempts=_attempts(5))
+def _evaluator_stop_before_start() -> bool:
+    evaluator = tev.Evaluator(2)
+    evaluator.stop()
+    runner = Thread(target = evaluator.start, daemon = True)
+    runner.start()
+    runner.join(timeout = 5)
+    return not runner.is_alive()
+
+
+@context(g.int_range(1, 4))
+@prop('A failing task is reported while the tasks next to it still run', attempts=_attempts(10))
+def _evaluator_reports_failure_at_once(slow_count: int) -> bool:
+    finished: list[int] = []
+    reported_while: list[int] = []
+
+    class _Evaluator(tev.Evaluator):
+        def on_task_failed(self, error: tev.TaskError, retrying: bool) -> None:
+            reported_while.append(len(finished))
+
+    def _fail(run: tev.Run) -> None:
+        raise tev.TaskError('Failure', 'failed')
+
+    evaluator = _Evaluator(slow_count + 1, keep_going = True)
+    _install(evaluator, [
+        tev.Task({}, (lambda run, index = index: (_sleep(run, 0.5), finished.append(index))))
+        for index in range(slow_count)
+    ] + [tev.Task({}, _fail)])
+    with _running(evaluator):
+        if not _wait_for(lambda: len(finished) == slow_count, 5.0): return False
+    return reported_while == [0]
+
+
 @context(g.int_range(1, 4), g.int_range(1, 6), worker_counts, g.int_range(1, 8))
-@prop('The evaluator runs each new program once and nothing of the programs it replaced', attempts=_attempts(30))
-def _evaluator_reprogram_stress(
+@prop('The evaluator runs each new schedule once and starts nothing of the schedules it replaced', attempts=_attempts(30))
+def _evaluator_reschedule_stress(
     program_count: int,
     task_count: int,
     workers: int,
     error_rate: int,
-    rng: random.Random
+    seed: int
 ) -> bool:
-    # A watcher thread reprograms while tasks run and fail, as file saves
-    # do in online mode; every program but the last may fail
+    # A watcher thread installs schedules while tasks run and fail, as file
+    # saves do in online mode; every schedule but the last may fail. The
+    # tasks have no keys, so a new schedule cancels the running ones.
+    rng = random.Random(seed)
+    plan = [
+        [
+            (program != program_count - 1 and rng.randrange(error_rate) == 0,
+             rng.random() * 0.005, [i for i in range(index) if rng.random() < 0.3])
+            for index in range(task_count)
+        ]
+        for program in range(program_count)
+    ]
+    pauses = [rng.random() * 0.01 for _ in range(program_count)]
     events: list[tuple[str, int, int]] = []
     lock = Lock()
-    reported: list[str] = []
 
-    class _Evaluator(tev.Evaluator):
-        def on_task_error(self, error: tev.TaskError) -> None:
-            reported.append(error.description)
-
-    def _work(program: int, index: int, fail: bool) -> None:
+    def _work(run: tev.Run, program: int, index: int) -> None:
+        fail, delay, _ = plan[program][index]
         with lock: events.append(('start', program, index))
-        time.sleep(rng.random() * 0.005)
+        _sleep(run, delay)
         if fail: raise tev.TaskError('Task %d.%d' % (program, index), 'failed')
         with lock: events.append(('done', program, index))
 
-    def _program(program: int, last: bool) -> list[tev.Task]:
-        tasks: list[tev.Task] = []
-        for index in range(task_count):
-            fail = not last and rng.randrange(error_rate) == 0
-            task = tev.Task(
-                {'flow': 0},
-                (lambda p = program, i = index, f = fail: _work(p, i, f))
-            )
-            for dep in tasks:
-                if rng.random() < 0.3: task.add_dependency(dep)
-            task.set_valid(False)
-            task.set_active(True)
-            tasks.append(task)
-        return tasks
-
-    evaluator = _Evaluator(workers)
-    runner = Thread(target = evaluator.start, daemon = True)
-    runner.start()
-    try:
+    evaluator = tev.Evaluator(workers, keep_going = True)
+    with _running(evaluator) as runner:
         for program in range(program_count):
-            last = program == program_count - 1
-            tasks = _program(program, last)
-            evaluator.pause()
-            evaluator.reprogram(tgraph.compile(tasks))
-            with lock: events.append(('installed', program, -1))
-            evaluator.resume()
-            time.sleep(rng.random() * 0.01)
+            tasks: list[tev.Task] = []
+            for index in range(task_count):
+                task = tev.Task({'flow': 0}, (
+                    lambda run, p = program, i = index: _work(run, p, i)
+                ))
+                for dep in plan[program][index][2]: task.add_dependency(tasks[dep])
+                tasks.append(task)
+            with lock:
+                _install(evaluator, tasks)
+                events.append(('installed', program, -1))
+            time.sleep(pauses[program])
         if not _wait_for(lambda: sum(
             1 for kind, program, _ in events
             if kind == 'done' and program == program_count - 1
         ) >= task_count, 10.0): return False
         time.sleep(0.05)
-    finally:
-        evaluator.stop()
-        runner.join(timeout = 10)
     if runner.is_alive(): return False
 
-    # Nothing of a replaced program starts after its replacement is in
     installed = -1
     final_starts: list[int] = []
     for kind, program, index in events:
@@ -1250,6 +1487,57 @@ def _evaluator_reprogram_stress(
             if program < installed: return False
             if program == program_count - 1: final_starts.append(index)
     return sorted(final_starts) == list(range(task_count))
+
+
+@context(g.int_range(1, 3))
+@prop('A running task that a new schedule would start carries on in it, and one it would not is cancelled', attempts=_attempts(10))
+def _evaluator_adopts_running(dependent_count: int) -> bool:
+    starts: list[str] = []
+    cancelled: list[str] = []
+    lock = Lock()
+
+    def _work(run: tev.Run, name: str, seconds: float) -> None:
+        with lock: starts.append(name)
+        run.on_cancel(lambda: cancelled.append(name))
+        _sleep(run, seconds)
+
+    def _graph() -> tuple[tev.Task, tev.Task, list[tev.Task]]:
+        kept = tev.Task({}, lambda run: _work(run, 'kept', 0.6), key = 'kept')
+        dropped = tev.Task({}, lambda run: _work(run, 'dropped', 5.0), key = 'dropped')
+        after = [
+            tev.Task({}, (lambda run, index = index: _work(run, 'after %d' % index, 0.0)))
+            for index in range(dependent_count)
+        ]
+        for task in after: task.add_dependency(kept)
+        return kept, dropped, after
+
+    evaluator = tev.Evaluator(4)
+    kept, dropped, after = _graph()
+    _install(evaluator, [kept, dropped] + after)
+    with _running(evaluator):
+        if not _wait_for(lambda: {'kept', 'dropped'} <= set(starts), 5.0): return False
+
+        # The new schedule has the kept task, and the dropped one only up to
+        # date; keep accepts the kept task's run
+        kept, dropped, after = _graph()
+        dropped.set_valid(True)
+        tasks = [kept] + after
+        for task in tasks:
+            task.set_valid(False)
+            task.set_active(True)
+        dropped.set_active(True)
+        evaluator.install(
+            evaluator.make_schedule([kept, dropped] + after),
+            lambda run, task: task.key == 'kept'
+        )
+        if not _wait_for(lambda: len(starts) == 2 + dependent_count, 5.0): return False
+        time.sleep(0.1)
+    return (
+        starts.count('kept') == 1
+        and cancelled == ['dropped']
+        and starts.count('dropped') == 1
+    )
+
 
 ###############################################################################
 # Agenda validation, paths and identity
@@ -1690,91 +1978,8 @@ def _cli_bad_cache_path(kind: int, mode: str) -> bool:
     return result.returncode != 0 and 'Traceback' not in result.stderr
 
 ###############################################################################
-# Stopping, failures and paths
+# Stage checks and paths
 ###############################################################################
-@context(g.int_range(1, 3), g.int_range(2, 4))
-@prop('Stopping the evaluator starts no more tasks of the running batch', attempts=_attempts(10))
-def _evaluator_stop_starts_nothing(workers: int, factor: int) -> bool:
-    started: list[int] = []
-    lock = Lock()
-
-    def _work(index: int) -> None:
-        with lock: started.append(index)
-        time.sleep(0.3)
-
-    evaluator = tev.Evaluator(workers)
-    tasks = [
-        tev.Task({'flow': 0}, (lambda index = index: _work(index)))
-        for index in range(workers * factor)
-    ]
-    for task in tasks:
-        task.set_valid(False)
-        task.set_active(True)
-    evaluator.pause()
-    evaluator.reprogram(tgraph.compile(tasks))
-    evaluator.resume()
-    runner = Thread(target = evaluator.start, daemon = True)
-    runner.start()
-    try:
-        if not _wait_for(lambda: len(started) != 0, 5.0): return False
-        time.sleep(0.05)
-        evaluator.stop()
-        runner.join(timeout = 10)
-    finally:
-        evaluator.stop()
-    return not runner.is_alive() and len(started) <= workers
-
-
-@prop('Stopping the evaluator before it starts ends it at once', attempts=_attempts(5))
-def _evaluator_stop_before_start() -> bool:
-    evaluator = tev.Evaluator(2)
-    evaluator.stop()
-    runner = Thread(target = evaluator.start, daemon = True)
-    runner.start()
-    runner.join(timeout = 5)
-    return not runner.is_alive()
-
-
-@context(g.int_range(1, 4))
-@prop('A failing task is reported while the rest of its batch still runs', attempts=_attempts(10))
-def _evaluator_reports_failure_at_once(slow_count: int) -> bool:
-    finished: list[int] = []
-    reported_while: list[int] = []
-
-    class _Evaluator(tev.Evaluator):
-        def on_task_failed(self, error: tev.TaskError) -> None:
-            reported_while.append(len(finished))
-
-        def on_task_error(self, error: tev.TaskError) -> None:
-            pass
-
-    def _slow(index: int) -> None:
-        time.sleep(0.5)
-        finished.append(index)
-
-    def _fail() -> None:
-        raise tev.TaskError('Failure', 'failed')
-
-    tasks = [
-        tev.Task({'flow': 0}, (lambda index = index: _slow(index)))
-        for index in range(slow_count)
-    ] + [tev.Task({'flow': 0}, _fail)]
-    for task in tasks:
-        task.set_valid(False)
-        task.set_active(True)
-    evaluator = _Evaluator(slow_count + 1)
-    evaluator.pause()
-    evaluator.reprogram(tgraph.compile(tasks))
-    evaluator.resume()
-    runner = Thread(target = evaluator.start, daemon = True)
-    runner.start()
-    try:
-        if not _wait_for(lambda: len(finished) == slow_count, 5.0): return False
-    finally:
-        evaluator.stop()
-        runner.join(timeout = 10)
-    return reported_while == [0]
-
 
 @context(any_agendas, g.int_range(0, 20))
 @prop('The stage check rejects a cycle with the stage order whatever is up to date', attempts=1000)
@@ -1846,49 +2051,457 @@ def _agenda_evaluate_offline_absolute_paths(agenda: ta.Agenda, workers: int) -> 
     return success and len(performed) == 0
 
 
-@context(g.int_range(0, 12))
-@prop('A succeeding task prints only the end of its stderr and logs all of it', attempts=_attempts(5))
-def _agenda_evaluate_offline_stderr_tail(line_count: int) -> bool:
+
+###############################################################################
+# Pipeline features
+###############################################################################
+def _script_task(desc: str, code: str, args: dict[str, list[str]], outputs: list[str], **fields) -> ta.Task:
+    """A task running a short Python program with its args as words."""
+    return ta.Task(
+        desc = desc, proc = desc, flows = [], args = args,
+        inputs = fields.pop('inputs', []), outputs = outputs, **fields
+    )
+
+
+def _script_agenda(tasks: list[tuple[ta.Task, str, list[str]]], **fields) -> ta.Agenda:
+    agenda = ta.Agenda(**fields)
+    for task, code, params in tasks:
+        agenda.procs[task.proc] = [sys.executable, '-c', code] + ['$' + p for p in params]
+        agenda.tasks.append(task)
+    return agenda
+
+
+@context(evaluated_agendas, worker_counts)
+@prop('With keep going, offline mode runs everything but what reads from a failed task', attempts=_attempts(100))
+def _agenda_evaluate_offline_keep_going(
+    agenda: ta.Agenda,
+    workers: int,
+    rng: random.Random
+) -> bool:
+    assume(len(agenda.tasks) != 0)
+    task = rng.choice(agenda.tasks)
+    _add_trigger(agenda, task, 'src/trigger.txt')
+    test_path = _fixture_path()
+    (test_path / 'src').mkdir()
+    (test_path / 'src' / 'trigger.txt').write_text('fail')
+    result, performed, _ = _offline_result(test_path, agenda, workers, keep_going = True)
+    downstream = _dependents(agenda, task) - {task.desc}
+    everyone = {other.desc for other in agenda.tasks}
+    return (
+        not result
+        and result.failed == [task.desc]
+        and set(result.blocked) == downstream
+        and set(performed) == everyone - downstream
+        and set(result.succeeded) == everyone - downstream - {task.desc}
+    )
+
+
+@context(g.int_range(2, 5), g.int_range(1, 2))
+@prop('A pool runs no more of its tasks at once than its depth', attempts=_attempts(5))
+def _agenda_evaluate_offline_pools(task_count: int, depth: int) -> bool:
+    code = (
+        'import sys, time, pathlib\n'
+        'start = time.time(); time.sleep(0.2)\n'
+        'pathlib.Path(sys.argv[1]).write_text("%r %r" % (start, time.time()))'
+    )
+    tasks = []
+    for index in range(task_count):
+        task = _script_task(
+            'Task %d' % index, code, {'output': ['out/%d.txt' % index]},
+            ['out/%d.txt' % index], pool = 'render'
+        )
+        task.proc = 'proc'
+        tasks.append(task)
     agenda = ta.Agenda(
-        procs = {'noisy': [
-            sys.executable, '-c',
-            'import pathlib, sys\n'
-            'for i in range(int(sys.argv[2])): print("line %d" % i, file = sys.stderr)\n'
-            'pathlib.Path(sys.argv[1]).write_text("done")',
-            '$output', '$count'
-        ]},
-        flows = {'flow': [['noisy']]},
-        tasks = [ta.Task(
-            desc = 'Task noisy', proc = 'noisy', flows = ['flow'],
-            args = {'output': ['out.txt'], 'count': [str(line_count)]},
-            inputs = [], outputs = ['out.txt']
-        )]
+        procs = {'proc': [sys.executable, '-c', code, '$output']},
+        tasks = tasks, pools = {'render': depth}
     )
     test_path = _fixture_path()
-    ta.store(test_path / 'agenda.yaml', agenda)
-    records = _Records()
-    logger = logging.getLogger('tickle')
-    logger.addHandler(records)
-    output = io.StringIO()
-    try:
-        with redirect_stdout(output):
-            success = tapi.offline(
-                test_path, test_path / 'agenda.yaml',
-                test_path / 'depend.yaml', test_path / 'tickle.cache', 1
-            )
-    finally:
-        logger.removeHandler(records)
-    printed = [
-        line for line in output.getvalue().splitlines()
-        if line.startswith('line ')
-    ]
-    logged = '\n'.join(record.getMessage() for record in records.records)
-    expected = ['line %d' % i for i in range(line_count)]
-    return (
-        success
-        and printed == expected[-5:]
-        and all(line in logged for line in expected)
+    (test_path / 'out').mkdir()
+    if not _run_offline(test_path, agenda, 8, processes = True)[0]: return False
+    spans = sorted(
+        tuple(map(float, (test_path / 'out' / ('%d.txt' % index)).read_text().split()))
+        for index in range(task_count)
     )
+    for start, _ in spans:
+        overlapping = sum(1 for other_start, other_end in spans if other_start <= start < other_end)
+        if overlapping > depth: return False
+    return True
+
+
+def _alive(pid: int) -> bool:
+    if os.name == 'nt':
+        result = subprocess.run(
+            ['tasklist', '/FI', 'PID eq %d' % pid], capture_output = True, text = True
+        )
+        return str(pid) in result.stdout
+    try: os.kill(pid, 0)
+    except ProcessLookupError: return False
+    except PermissionError: return True
+    return True
+
+
+# Starts a child process that sleeps, writes the child's pid, then sleeps
+_SLEEPER = (
+    'import subprocess, sys, time, pathlib\n'
+    'child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])\n'
+    'pathlib.Path(sys.argv[1]).write_text(str(child.pid))\n'
+    'time.sleep(60)'
+)
+
+
+@prop('A task that runs past its timeout fails, and its processes are stopped', attempts=_attempts(3))
+def _agenda_evaluate_offline_timeout() -> bool:
+    task = _script_task('Task slow', _SLEEPER, {'pid': ['pid.txt'], 'output': ['out.txt']}, ['out.txt'], timeout = 1)
+    agenda = _script_agenda([(task, _SLEEPER, ['pid', 'output'])])
+    test_path = _fixture_path()
+    start = time.monotonic()
+    result, _, printed = _offline_result(test_path, agenda, 1, processes = True)
+    if result or result.failed != ['Task slow']: return False
+    if 'timed out' not in printed or time.monotonic() - start > 20: return False
+    pid = int((test_path / 'pid.txt').read_text())
+    return _wait_for(lambda: not _alive(pid), 15.0)
+
+
+@context(g.int_range(0, 3), g.int_range(0, 2))
+@prop('A failing task runs again as often as its retries allow', attempts=_attempts(5))
+def _agenda_evaluate_offline_retries(failures: int, retries: int) -> bool:
+    code = (
+        'import sys, pathlib\n'
+        'count = pathlib.Path(sys.argv[1])\n'
+        'n = int(count.read_text()) if count.exists() else 0\n'
+        'count.write_text(str(n + 1))\n'
+        'if n < int(sys.argv[3]): sys.exit("failure %d" % n)\n'
+        'pathlib.Path(sys.argv[2]).write_text("done")'
+    )
+    task = _script_task(
+        'Task flaky', code,
+        {'count': ['count.txt'], 'output': ['out.txt'], 'failures': [str(failures)]},
+        ['out.txt'], retries = retries
+    )
+    agenda = _script_agenda([(task, code, ['count', 'output', 'failures'])])
+    test_path = _fixture_path()
+    success, _ = _run_offline(test_path, agenda, 1, processes = True)
+    runs = int((test_path / 'count.txt').read_text())
+    if failures <= retries: return success and runs == failures + 1
+    return not success and runs == retries + 1
+
+
+@context(g.one_of(['SIGINT', 'SIGTERM']))
+@prop('Interrupting offline mode stops running tasks and their processes', attempts=_attempts(4))
+def _cli_interrupt_kills(signal_name: str) -> bool:
+    if os.name == 'nt': return True
+    task = _script_task('Task slow', _SLEEPER, {'pid': ['pid.txt'], 'output': ['out.txt']}, ['out.txt'])
+    agenda = _script_agenda([(task, _SLEEPER, ['pid', 'output'])])
+    test_path = _fixture_path()
+    ta.store(test_path / 'agenda.yaml', agenda)
+    process = subprocess.Popen(
+        [sys.executable, '-c', 'from tickle.cli import main; main()', 'offline'],
+        cwd = test_path, start_new_session = True,
+        stdout = subprocess.DEVNULL, stderr = subprocess.DEVNULL
+    )
+    try:
+        if not _wait_for(lambda: (test_path / 'pid.txt').exists()): return False
+        time.sleep(0.2)
+        os.kill(process.pid, getattr(signal, signal_name))
+        code = process.wait(timeout = 20)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+    pid = int((test_path / 'pid.txt').read_text())
+    expected = 130 if signal_name == 'SIGINT' else 143
+    return code == expected and _wait_for(lambda: not _alive(pid), 15.0)
+
+
+@prop('A second run in a project waits for the first to end', attempts=_attempts(3))
+def _agenda_evaluate_offline_lock() -> bool:
+    code = 'import sys, time, pathlib; pathlib.Path(sys.argv[1]).write_text("x"); time.sleep(1.5); pathlib.Path(sys.argv[2]).write_text("x")'
+    task = _script_task('Task slow', code, {'marker': ['started.txt'], 'output': ['out.txt']}, ['out.txt'])
+    agenda = _script_agenda([(task, code, ['marker', 'output'])])
+    test_path = _fixture_path()
+    ta.store(test_path / 'agenda.yaml', agenda)
+    first: list[bool] = []
+    runner = Thread(target = lambda: first.append(_run_offline(test_path, processes = True)[0]), daemon = True)
+    runner.start()
+    try:
+        if not _wait_for(lambda: (test_path / 'started.txt').exists()): return False
+        second, _, printed = _offline_result(test_path)
+        cleaned = _clean(test_path)
+    finally:
+        runner.join(timeout = 20)
+    if second or 'Another tickle run' not in (second.error or ''): return False
+    if cleaned: return False
+    return first == [True] and bool(_offline_result(test_path)[0])
+
+
+@context(evaluated_agendas, worker_counts)
+@prop('Offline evaluation of targets runs only them and what they need', attempts=_attempts(50))
+def _agenda_evaluate_offline_targets(
+    agenda: ta.Agenda,
+    workers: int,
+    by_output: bool,
+    rng: random.Random
+) -> bool:
+    assume(len(agenda.tasks) != 0)
+    targets = rng.sample(agenda.tasks, rng.randint(1, min(3, len(agenda.tasks))))
+    names = [
+        _norm(task.outputs[0]) if by_output else task.desc
+        for task in targets
+    ]
+    producer = {_norm(output): task for task in agenda.tasks for output in task.outputs}
+    needed: set[str] = set()
+    worklist = list(targets)
+    while len(worklist) != 0:
+        task = worklist.pop()
+        if task.desc in needed: continue
+        needed.add(task.desc)
+        worklist.extend(
+            producer[_norm(input)] for input in task.inputs
+            if _norm(input) in producer
+        )
+    test_path = _fixture_path()
+    success, performed = _run_offline(test_path, agenda, workers, targets = names)
+    if not success or set(performed) != needed: return False
+    success, performed = _run_offline(test_path, agenda, workers)
+    return success and set(performed) == {task.desc for task in agenda.tasks} - needed
+
+
+@context(evaluated_agendas, worker_counts)
+@prop('A dry run plans what a run then does, and does nothing', attempts=_attempts(50))
+def _agenda_evaluate_offline_dry_run(
+    agenda: ta.Agenda,
+    workers: int,
+    rng: random.Random
+) -> bool:
+    test_path = _fixture_path()
+    if not _run_offline(test_path, agenda, workers)[0]: return False
+    if len(agenda.tasks) != 0:
+        (test_path / _norm(rng.choice(agenda.tasks).outputs[0])).unlink()
+    cache_before = (test_path / 'tickle.cache').read_bytes()
+    result, performed, _ = _offline_result(test_path, agenda, workers, dry_run = True)
+    if not result or len(performed) != 0: return False
+    if (test_path / 'tickle.cache').read_bytes() != cache_before: return False
+    success, performed = _run_offline(test_path, agenda, workers)
+    return success and sorted(performed) == sorted(result.planned)
+
+
+@context(evaluated_agendas, worker_counts)
+@prop('A task that runs always runs on every run, and changes nothing else', attempts=_attempts(30))
+def _agenda_evaluate_offline_always(agenda: ta.Agenda, workers: int) -> bool:
+    script = [sys.executable, str(SUCCESS_SCRIPT), '-i', '$inputs', '-o', '$outputs']
+    agenda.procs['always'] = script
+    agenda.tasks.append(ta.Task(
+        desc = 'Task always', proc = 'always', args = {'inputs': [], 'outputs': []},
+        always = True
+    ))
+    test_path = _fixture_path()
+    success, performed = _run_offline(test_path, agenda, workers)
+    if not success or set(performed) != {task.desc for task in agenda.tasks}: return False
+    success, performed = _run_offline(test_path, agenda, workers)
+    return success and performed == ['Task always']
+
+
+def _to_version_2(cache_path: Path) -> None:
+    """Rewrite a cache as tickle 0.5.0 wrote it: task records of only their
+    input hashes, and no stats or logs."""
+    with cache_path.open('rb') as file: data = pickle.load(file)
+    data = {
+        'version': 2,
+        'tasks': {key: record['inputs'] for key, record in data['tasks'].items()},
+        'files': data['files'],
+        'folders': data['folders']
+    }
+    with cache_path.open('wb') as file: pickle.dump(data, file)
+
+
+@context(evaluated_agendas, worker_counts)
+@prop('A cache written by tickle 0.5.0 is migrated without running any task', attempts=_attempts(50))
+def _agenda_evaluate_offline_migrate(agenda: ta.Agenda, workers: int) -> bool:
+    test_path = _fixture_path()
+    if not _run_offline(test_path, agenda, workers)[0]: return False
+    _to_version_2(test_path / 'tickle.cache')
+    success, performed = _run_offline(test_path, agenda, workers)
+    if not success or len(performed) != 0: return False
+    with (test_path / 'tickle.cache').open('rb') as file:
+        return pickle.load(file)['version'] == tapi._CACHE_VERSION
+
+
+@context(evaluated_agendas)
+@prop('A cache written by a newer tickle is refused and left alone', attempts=_attempts(20))
+def _agenda_evaluate_offline_newer_cache(agenda: ta.Agenda) -> bool:
+    test_path = _fixture_path()
+    if not _run_offline(test_path, agenda)[0]: return False
+    cache_path = test_path / 'tickle.cache'
+    with cache_path.open('rb') as file: data = pickle.load(file)
+    data['version'] = tapi._CACHE_VERSION + 1
+    with cache_path.open('wb') as file: pickle.dump(data, file)
+    before = cache_path.read_bytes()
+    result, performed, _ = _offline_result(test_path, agenda)
+    if result or 'newer version' not in (result.error or '') or len(performed) != 0:
+        return False
+    return cache_path.read_bytes() == before and not _clean(test_path)
+
+
+@context(evaluated_agendas, worker_counts)
+@prop('A run with nothing to do hashes no file whose size and time are unchanged', attempts=_attempts(30))
+def _agenda_evaluate_offline_no_rehash(agenda: ta.Agenda, workers: int) -> bool:
+    for index, task in enumerate(agenda.tasks):
+        _add_trigger(agenda, task, 'src/source_%d.txt' % index)
+    test_path = _fixture_path()
+    (test_path / 'src').mkdir()
+    past = time.time() - 60
+    for index in range(len(agenda.tasks)):
+        path = test_path / 'src' / ('source_%d.txt' % index)
+        path.write_text('source %d' % index)
+        os.utime(path, (past, past))
+    if not _run_offline(test_path, agenda, workers)[0]: return False
+
+    # Outputs written in this run are too new to be trusted; age them too
+    for path in _outputs(test_path, agenda): os.utime(path, (past, past))
+    if not _run_offline(test_path, agenda, workers)[0]: return False
+    hashed: list[Path] = []
+    original = tapi._md5
+
+    def _counting(path: Path) -> str | None:
+        # The agenda's files, not the depend file tickle watches
+        if path.name != 'depend.yaml': hashed.append(path)
+        return original(path)
+
+    tapi._md5 = _counting  # type: ignore
+    try: success, performed = _run_offline(test_path, agenda, workers)
+    finally: tapi._md5 = original  # type: ignore
+    return success and len(performed) == 0 and len(hashed) == 0
+
+
+@context(evaluated_agendas, worker_counts)
+@prop('The API takes an agenda object, and its result lists what happened', attempts=_attempts(30))
+def _api_agenda_object(agenda: ta.Agenda, workers: int) -> bool:
+    test_path = _fixture_path()
+    output = io.StringIO()
+    logging.disable(logging.CRITICAL)
+    try:
+        with redirect_stdout(output), _executor(False):
+            result = tapi.offline(test_path, agenda, worker_count = workers)
+            again = tapi.offline(test_path, agenda, worker_count = workers)
+    finally:
+        logging.disable(logging.NOTSET)
+    descs = sorted(task.desc for task in agenda.tasks)
+    return (
+        bool(result) and sorted(result.succeeded) == descs
+        and bool(again) and again.succeeded == []
+        and (test_path / 'tickle.cache').exists()
+        and not (test_path / 'agenda.yaml').exists()
+    )
+
+
+@prop('A failing task reports the end of its output and keeps all of it in its log', attempts=_attempts(5))
+def _agenda_evaluate_offline_task_log() -> bool:
+    code = 'import sys\nfor i in range(50): print("line %d" % i)\nsys.exit(3)'
+    task = _script_task('Task noisy', code, {'output': ['out.txt']}, ['out.txt'])
+    agenda = _script_agenda([(task, code, ['output'])])
+    test_path = _fixture_path()
+    result, _, printed = _offline_result(test_path, agenda, 1, processes = True)
+    logs = list((test_path / 'tickle-logs').glob('*.log'))
+    if result or len(logs) != 1: return False
+    logged = logs[0].read_text().splitlines()
+    return (
+        logged == ['line %d' % i for i in range(50)]
+        and 'exited with code 3' in printed
+        and 'line 49' in printed and 'line 10\n' not in printed
+        and str(logs[0].relative_to(test_path)) in printed
+    )
+
+
+@context(worker_counts)
+@prop('Online mode keeps a running task through unrelated changes and restarts it when its input changes', attempts=_attempts(5))
+def _agenda_evaluate_online_adopts(workers: int) -> bool:
+    code = (
+        'import sys, time, pathlib\n'
+        'starts = pathlib.Path(sys.argv[2])\n'
+        'starts.write_text(starts.read_text() + "x" if starts.exists() else "x")\n'
+        'time.sleep(1.5)\n'
+        'pathlib.Path(sys.argv[3]).write_text(pathlib.Path(sys.argv[1]).read_text())'
+    )
+    slow = _script_task(
+        'Task slow', code,
+        {'input': ['src/slow.txt'], 'starts': ['starts.txt'], 'output': ['out/slow.txt']},
+        ['out/slow.txt'], inputs = ['src/slow.txt']
+    )
+    agenda = _script_agenda([(slow, code, ['input', 'starts', 'output'])])
+    agenda.procs['copy'] = [sys.executable, str(SUCCESS_SCRIPT), '-i', '$inputs', '-o', '$outputs']
+    agenda.tasks.append(ta.Task(
+        desc = 'Task other', proc = 'copy',
+        args = {'inputs': ['src/other.txt'], 'outputs': ['out/other.txt']},
+        inputs = ['src/other.txt'], outputs = ['out/other.txt']
+    ))
+    test_path = _fixture_path()
+    (test_path / 'src').mkdir()
+    (test_path / 'out').mkdir()
+    (test_path / 'src' / 'slow.txt').write_text('first')
+    (test_path / 'src' / 'other.txt').write_text('other')
+    agenda_path = test_path / 'agenda.yaml'
+    ta.store(agenda_path, agenda)
+    starts = test_path / 'starts.txt'
+    with _quiet():
+        evaluator = tapi.online(test_path, agenda_path, worker_count = workers)
+        if evaluator is None: return False
+        runner = Thread(target = evaluator.start, daemon = True)
+        runner.start()
+        try:
+            # An unrelated change while the slow task runs
+            if not _wait_for(lambda: starts.exists()): return False
+            (test_path / 'src' / 'other.txt').write_text('changed')
+            if not _wait_for(lambda: (test_path / 'out' / 'slow.txt').exists()): return False
+            if starts.read_text() != 'x': return False
+
+            # A change to its own input while it runs restarts it
+            (test_path / 'out' / 'slow.txt').unlink()
+            (test_path / 'src' / 'slow.txt').write_text('second')
+            if not _wait_for(lambda: starts.read_text() == 'xx'): return False
+            time.sleep(0.3)
+            (test_path / 'src' / 'slow.txt').write_text('third')
+            if not _wait_for(lambda: (test_path / 'out' / 'slow.txt').exists()
+                and (test_path / 'out' / 'slow.txt').read_text() == 'third'):
+                return False
+            ok = starts.read_text() == 'xxx'
+        finally:
+            evaluator.stop()
+            runner.join(timeout = 10)
+    return ok and not runner.is_alive()
+
+
+@context(g.one_of(['delete', 'replace']))
+@prop('The watcher follows a file whose folder is deleted and created again, or replaced', attempts=_attempts(5))
+def _watcher_reanchors(how: str) -> bool:
+    import tickle.watch as twatch
+    test_path = _fixture_path()
+    folder = test_path / 'src'
+    folder.mkdir()
+    (folder / 'file.txt').write_text('first')
+    events: list[str] = []
+    watcher = twatch.FileWatcher()
+    watcher.subscribe(folder / 'file.txt', lambda event: events.append(event.value))
+    watcher.start()
+    try:
+        time.sleep(0.3)
+        if how == 'delete':
+            shutil.rmtree(folder)
+            time.sleep(0.3)
+            folder.mkdir()
+        else:
+            other = test_path / 'other'
+            other.mkdir()
+            (other / 'unrelated.txt').write_text('x')
+            shutil.rmtree(folder)
+            os.rename(other, folder)
+        time.sleep(0.5)
+        events.clear()
+        (folder / 'file.txt').write_text('second')
+        return _wait_for(lambda: len(events) != 0, 5.0)
+    finally:
+        watcher.stop()
+
 
 ###############################################################################
 # Specification
@@ -1920,13 +2533,9 @@ spec = conj(
     _agenda_evaluate_offline_matches_clean_build,
     _agenda_evaluate_offline_relocate,
     _agenda_evaluate_offline_depend_order,
-    _program_order_respected,
-    _evaluator_error_keeps_next_program,
     _agenda_evaluate_online,
     _agenda_clean,
     _agenda_clean_safe,
-    _program_runs_runnable_tasks,
-    _program_compile_wide,
     _agenda_rejects_empty_flow,
     _agenda_evaluate_offline_spellings,
     _agenda_evaluate_offline_output_spellings,
@@ -1934,20 +2543,42 @@ spec = conj(
     _agenda_evaluate_offline_no_stdin,
     _logging_own_logger,
     _cli_bad_cache_path,
-    _program_batches_earliest,
-    _program_order_extra_deps,
-    _evaluator_reprogram_stress,
     _agenda_decode_error_location,
     _agenda_evaluate_offline_depend_generated,
     _agenda_evaluate_offline_changed_back,
     _agenda_evaluate_online_skipped,
     _agenda_clean_old_cache,
     _cli_interrupt,
-    _evaluator_stop_starts_nothing,
-    _evaluator_stop_before_start,
-    _evaluator_reports_failure_at_once,
     _graph_check_stages,
     _agenda_evaluate_offline_stage_cycle_cached,
     _agenda_evaluate_offline_absolute_paths,
-    _agenda_evaluate_offline_stderr_tail,
+    _schedule_order,
+    _schedule_pools,
+    _schedule_keep_going,
+    _schedule_stop_on_failure,
+    _schedule_retries,
+    _schedule_priority,
+    _schedule_scale,
+    _evaluator_starts_when_ready,
+    _evaluator_stop_starts_nothing,
+    _evaluator_stop_before_start,
+    _evaluator_reports_failure_at_once,
+    _evaluator_reschedule_stress,
+    _evaluator_adopts_running,
+    _agenda_evaluate_offline_keep_going,
+    _agenda_evaluate_offline_pools,
+    _agenda_evaluate_offline_timeout,
+    _agenda_evaluate_offline_retries,
+    _cli_interrupt_kills,
+    _agenda_evaluate_offline_lock,
+    _agenda_evaluate_offline_targets,
+    _agenda_evaluate_offline_dry_run,
+    _agenda_evaluate_offline_always,
+    _agenda_evaluate_offline_migrate,
+    _agenda_evaluate_offline_newer_cache,
+    _agenda_evaluate_offline_no_rehash,
+    _api_agenda_object,
+    _agenda_evaluate_offline_task_log,
+    _agenda_evaluate_online_adopts,
+    _watcher_reanchors,
 )

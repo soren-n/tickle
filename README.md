@@ -32,11 +32,9 @@ Tickle has two evaluation modes:
 
 In build system terms, offline mode is like a regular build, and online mode is like a watch/dev/live build. Both are incremental.
 
-Online mode currently has these limits:
+Online mode applies a change once it has settled for a moment, without waiting for running tasks: a running task whose definition and inputs did not change carries on, and one whose did is stopped and started again. A generated file that is deleted is built again on the next change, not at once.
 
-- A change is applied once the tasks that are running have finished, which can take a while with long tasks.
-- If the folder of a watched input is deleted and created again, or replaced by renaming another folder over it, changes to the files in it are no longer noticed; restart online mode after such a change.
-- A generated file that is deleted is built again on the next change, not at once.
+Each task starts as soon as the tasks it reads from have finished, and those of the earlier stages of its flows. When several tasks are ready, the one heading the longest chain of work starts first, judged by how long the tasks took last time, so long chains do not end up last. Only one run can use a project at a time; a second one fails at once, naming the run that holds it.
 
 # Assumptions
 Tickle assumes that it has full control over the input and output files described in the agenda. The only files that tickle supports modification to during runtime are: the agenda file, the depend file and the initial input files.
@@ -48,8 +46,9 @@ Tickle can be used through two interfaces; the CLI and the API.
 
 ## CLI
 ```
-usage: tickle [-h] [--debug] [-w WORKERS] [-a AGENDA] [-d DEPEND] [-c CACHE] [-l LOG]
-              {offline,online,clean,version}
+usage: tickle [-h] [-k] [--stop-on-failure] [-n] [--log-dir LOG_DIR] [--debug]
+              [-w WORKERS] [-a AGENDA] [-d DEPEND] [-c CACHE] [-l LOG]
+              {offline,online,clean,version} [TARGET ...]
 
 Task graph scheduling with asynchronous evaluation.
 
@@ -63,24 +62,34 @@ positional arguments:
                         or online evaluation, keeping files that are now sources or that
                         changed since they were generated. Version mode will print the
                         tool version.
+  TARGET                Run only what these need: task descriptions or output files; all
+                        tasks if none are given (default: None)
 
 options:
   -h, --help            show this help message and exit
+  -k, --keep-going      Offline mode: after a task fails, keep running the tasks that do
+                        not read from it (default: False)
+  --stop-on-failure     Online mode: after a task fails, start nothing more until the
+                        next change (default: False)
+  -n, --dry-run         Offline mode: print the tasks that would run, without running
+                        them (default: False)
+  --log-dir LOG_DIR     Folder for the output of each task, one log file per task; must
+                        be inside the current working directory (default: tickle-logs)
   --debug               Sets debug logging level for tool messages (default: False)
   -w, --workers WORKERS
                         The number of concurrent workers; defaults to the number of
                         logical cores minus one for the main thread (default: e.g. 7)
   -a, --agenda AGENDA   Agenda YAML file location; contains the procedure and task
-                        definitions, file path must be relative to current working
-                        directory (default: agenda.yaml)
+                        definitions, must be inside the current working directory
+                        (default: agenda.yaml)
   -d, --depend DEPEND   Depend YAML file location; contains a map of dynamic task
-                        dependencies, this file is optional, file path must be relative
-                        to current working directory (default: depend.yaml)
+                        dependencies, this file is optional, must be inside the current
+                        working directory (default: depend.yaml)
   -c, --cache CACHE     Binary cache file location; contains inter-run persistent data,
-                        file path must be relative to current working directory
-                        (default: tickle.cache)
-  -l, --log LOG         Log file location; contains runtime messages, file path must be
-                        relative to current working directory (default: tickle.log)
+                        must be inside the current working directory (default:
+                        tickle.cache)
+  -l, --log LOG         Log file location; contains runtime messages, must be inside the
+                        current working directory (default: tickle.log)
 ```
 The CLI has two additional modes to offline/online:
 
@@ -90,9 +99,15 @@ The CLI has two additional modes to offline/online:
 The clean mode will only delete generated folders if they are empty after generated files are deleted; i.e. if there are leftover files in the folders, e.g. generated from other processes not within the control of tickle; these files and the host folders are then left untouched.
 Clean also keeps a generated file that the current agenda or depend file now reads as a source, a file that changed after tickle last wrote it, and anything outside the current directory.
 
-The exit code is 0 on success and 1 on failure: a task failed, the agenda or depend file is invalid, or offline mode skipped tasks that could not run. An invalid command line, such as a cache file outside the current directory or in a folder that does not exist, exits with 2. Interrupting offline mode with Ctrl-C exits with 130; the tasks that did not finish run again next time. Online mode stops on Ctrl-C or SIGTERM once the running tasks finish, and starts no new ones. Offline mode does not yet handle SIGTERM: tickle ends at once and the tasks it started keep running, so stop it with Ctrl-C (SIGINT to its process group) where you can.
+The exit code is 0 on success and 1 on failure: a task failed, the agenda or depend file is invalid, offline mode skipped tasks that could not run, or another run is using the project. An invalid command line, such as a cache file outside the current directory or in a folder that does not exist, exits with 2. Interrupting offline mode with Ctrl-C exits with 130, and SIGTERM with 143; either way the running tasks are stopped, and the tasks that did not finish run again next time. Online mode stops on Ctrl-C or SIGTERM, stopping its running tasks.
 
-While evaluating, tickle prints each task as it starts; the lines are flushed at once, so they also appear as they happen when the output goes to a pipe or a file. A task that succeeds but writes to stderr, such as a compiler warning, gets a warning with the last five lines of that output; the log file has all of it. A task that succeeds without writing all of its outputs is reported too. A failing task's stderr, or its stdout if stderr is empty, is printed as soon as it fails, while the other running tasks carry on.
+Tasks run in a process group of their own, so stopping a task, at a timeout or an interrupt, stops the processes it started too: tickle asks them to end and kills them after five seconds.
+
+Without `--keep-going`, nothing more starts after a task fails; the tasks already running finish and are recorded. With it, every task that does not read from the failed task, directly or through other tasks, still runs; a stage counts a failed task as finished, so the later stages of its flows go on.
+
+Give targets after the mode, as task descriptions or output files, to run only them and the tasks they need: `tickle offline out/final.mp4`. `--dry-run` prints the tasks that would run, in an order they could run in, without running them.
+
+While evaluating, tickle prints each task as it starts; the lines are flushed at once, so they also appear as they happen when the output goes to a pipe or a file. Each task's output, stdout and stderr together, goes to a log file of its own in `tickle-logs` (set with `--log-dir`), replaced each time the task runs. When a task fails, the end of its output and the path of its log are printed as soon as it fails. A task that succeeds without writing all of its outputs is reported.
 
 If you stick to the default paths and file names, then running tickle should be as simple as:
 ```
@@ -105,7 +120,7 @@ Where `MODE` is one of offline, online, clean or version.
 The API is accessible in case you wish to run one of the evaluation modes as part of your workflow scripts; rather than spawning a subprocess for tickle.
 The basic setup is that your script generates an agenda, stores it, and then runs tickle through the api.
 
-All paths given to the API must be absolute, and the agenda, depend and cache paths must lie within the target directory. Each mode also takes an optional `worker_count`, which defaults to the number of logical cores minus one.
+All paths given to the API must be absolute, and the agenda, depend and cache paths must lie within the target directory; paths left out take the defaults in the target directory. Each mode also takes an optional `worker_count`, which defaults to the number of logical cores minus one, and keyword options such as `keep_going`, `targets` and `dry_run`; `offline` takes the agenda as a path or as an `Agenda` object.
 
 For example running tickle in offline mode could look something like this:
 ```Python
@@ -125,13 +140,16 @@ def my_workflow(target_dir: Path) -> bool:
     agenda_data = make_agenda(target_dir)
     agenda.store(agenda_path, agenda_data)
 
-    # Run tickle offline; returns whether every task succeeded
-    return tickle_api.offline(
+    # Run tickle offline; the result says what ran, failed or was
+    # skipped, and is true when every task succeeded
+    result = tickle_api.offline(
         target_dir,
         agenda_path,
         depend_path,
-        cache_path
+        cache_path,
+        keep_going = True
     )
+    return bool(result)
 ```
 
 In online mode, `tickle_api.online` returns an evaluator instead of running it. Its `start` method blocks until `stop` is called, so run it in a thread of its own:
@@ -153,7 +171,8 @@ def my_workflow(target_dir: Path) -> None:
     agenda_data = make_agenda(target_dir)
     agenda.store(agenda_path, agenda_data)
 
-    # Make the online evaluator; None if the agenda file is missing
+    # Make the online evaluator; None if the agenda file is missing or
+    # another run is using the project
     evaluator = tickle_api.online(
         target_dir,
         agenda_path,
@@ -210,8 +229,17 @@ tasks:
       - <file path 1>
       - <file path 2>
       ...
+    pool: <pool name>
+    timeout: <seconds>
+    retries: <count>
+    always: <true or false>
+  ...
+pools:
+  <pool name>: <how many of its tasks may run at once>
   ...
 ```
+Every section and every task field but desc and proc is optional.
+
 The procs section defines a dictionary of procedures.
 A proc is defined with a name and its implementation is a command as a list of string words.
 A command word is a parameter if it is prefixed with $; every other word is passed to the command exactly as written, spaces and all.
@@ -232,6 +260,12 @@ The proc is selected with the proc field.
 The proc parameters are given arguments via the args field.
 An arg is a list of string values to be inserted into the proc's command; each value becomes one word of the command, in place of the parameter.
 The input and output files that the task ranges over are set with the inputs and outputs fields; paths are relative to the agenda file's folder.
+A task in no flow is ordered by its inputs alone.
+
+The pools section limits how many tasks of a kind run at once, below the worker count, such as one task at a time on the GPU or two large encodes: a task names its pool with the pool field.
+A task with a timeout is stopped and fails when it runs longer than that many seconds.
+A task with retries runs again when it fails, up to that many times, before it counts as failed; use it for tasks that fail now and then for reasons outside them, such as a network share.
+None of these fields change what a task is, so changing them does not make it rerun.
 
 A task is rerun when:
 
@@ -244,7 +278,9 @@ A task records its inputs only when it succeeds, so a task that failed or was in
 
 A task with an input that does not exist and that no task produces is skipped, together with the tasks that depend on it. The rest of the agenda is still evaluated, and offline mode then fails. Inputs must be files; a task with a folder as an input is skipped the same way.
 
-A task must have at least one output; a task without outputs is skipped the same way. For a task that only has an effect elsewhere, such as uploading a file, let its command also write a small stamp file and list that as its output.
+A task must have at least one output; a task without outputs is skipped the same way, unless it sets `always: true`, which makes it run on every run; nothing can depend on such a task. For a task that only has an effect elsewhere, such as uploading a file, that should run only when its inputs change, let its command also write a small stamp file and list that as its output.
+
+To decide whether an input changed, tickle compares its size and modification time with those it saw when it last hashed it, and only hashes it again when they differ, or when the file was modified within two seconds of being hashed. A tool that changes a file's content but keeps its size and modification time, such as some that restore timestamps, goes unnoticed; touch the file after such a tool.
 
 Paths may be written in any equivalent way: `out/x.txt`, `./out/x.txt`, `out/../out/x.txt` and the absolute path name the same file, and changing how a path is written does not make a task rerun. Tickle compares paths as written, without resolving symbolic links or ignoring case, so on a file system that ignores case `out/x.txt` and `OUT/X.txt` are one file to the system but two to tickle; spell each path one way.
 

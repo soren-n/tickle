@@ -2,7 +2,6 @@
 from pathlib import Path
 import argparse
 import hashlib
-import logging
 import json
 import sys
 import os
@@ -10,10 +9,10 @@ import os
 ###############################################################################
 # Functions
 ###############################################################################
-def _implicits(inputs : list) -> list:
+def _implicits(cwd : Path, inputs : list) -> list:
     """The files the inputs depend on through depend.yaml in the working
     directory, the way a compiler reads the headers a source includes."""
-    depend_path = Path('depend.yaml')
+    depend_path = cwd / 'depend.yaml'
     if not depend_path.exists(): return []
     import yaml
     depend = yaml.safe_load(depend_path.read_text()) or {}
@@ -31,90 +30,70 @@ def _implicits(inputs : list) -> list:
             worklist.append(dep)
     return sorted(result)
 
-def _read(path : str) -> str:
-    try: return Path(path).read_text()
+def _read(path : Path) -> str:
+    try: return path.read_text()
     except FileNotFoundError: return '<missing>'
 
-###############################################################################
-# Main entry
-###############################################################################
-def main(args : argparse.Namespace) -> bool:
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog = 'success',
+        description = 'Checks inputs files exists, and creates output files.',
+        exit_on_error = False
+    )
+    parser.add_argument('-i', '--inputs', type = str, nargs = '*', dest = 'inputs', default = [])
+    parser.add_argument('-o', '--outputs', type = str, nargs = '*', dest = 'outputs', default = [])
+    # Ignored words that change the command and the outputs
+    parser.add_argument('--salt', type = str, nargs = '*', dest = 'salt', default = [])
+    # Files to append to after reading the inputs
+    parser.add_argument('--append', type = str, nargs = '*', dest = 'append', default = [])
+    return parser
+
+def run(argv : list, cwd : Path, log) -> int:
+    """Run the script with the arguments argv in the folder cwd, writing
+    messages to log; returns the exit code. The tests call this in-process
+    as well, from several threads at once, so it never changes the working
+    directory."""
+    args = _parser().parse_args(argv)
 
     # Check inputs
     for input in args.inputs:
-        input_path = Path(input)
+        input_path = cwd / input
         if not input_path.exists():
-            logging.critical('Not such file or directory:\n%s' % input)
-            return False
+            log.write('No such file or directory: %s\n' % input)
+            return 1
         if not input_path.is_file():
-            logging.critical('Input path is not a file:\n%s' % input)
-            return False
+            log.write('Input path is not a file: %s\n' % input)
+            return 1
         # Lets a property make a task fail without changing its definition
         if input_path.read_text() == 'fail':
-            logging.critical('Input asked to fail:\n%s' % input)
-            return False
+            log.write('Input asked to fail: %s\n' % input)
+            return 1
 
     # The outputs are a digest of everything the task read, so a stale
     # output differs from the one a clean build writes
-    implicits = _implicits(args.inputs)
+    implicits = _implicits(cwd, args.inputs)
     content = hashlib.md5(json.dumps({
-        'argv': sys.argv[1:],
-        'inputs': [[input, _read(input)] for input in args.inputs],
-        'implicits': [[file, _read(file)] for file in implicits]
+        'argv': argv,
+        'inputs': [[input, _read(cwd / input)] for input in args.inputs],
+        'implicits': [[file, _read(cwd / file)] for file in implicits]
     }, sort_keys = True).encode('utf-8')).hexdigest()
 
     # Edit a file after reading the inputs, like a user saving a file while
     # the task runs
     for path in args.append:
-        with open(path, 'a') as file: file.write('+')
+        with open(cwd / path, 'a') as file: file.write('+')
 
     # Create outputs
     for output in args.outputs:
-        output_path = Path(output)
-        parent_path = output_path.parent
-        if not parent_path.exists(): os.makedirs(parent_path, exist_ok = True)
-        with output_path.open('w+') as output_file: output_file.write(content)
+        output_path = cwd / output
+        output_path.parent.mkdir(parents = True, exist_ok = True)
+        output_path.write_text(content)
 
     # Done
-    return True
+    return 0
 
+###############################################################################
+# Main entry
+###############################################################################
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(
-        prog = 'success',
-        description = 'Checks inputs files exists, and creates output files.',
-        formatter_class = argparse.ArgumentDefaultsHelpFormatter
-    )
-    parser.add_argument(
-        '-i', '--inputs',
-        type = str,
-        nargs = '*',
-        dest = 'inputs',
-        default = [],
-        help = 'The input file paths that will be check for existance.'
-    )
-    parser.add_argument(
-        '-o', '--outputs',
-        type = str,
-        nargs = '*',
-        dest = 'outputs',
-        default = [],
-        help = 'The output file paths that will be created.'
-    )
-    parser.add_argument(
-        '--salt',
-        type = str,
-        nargs = '*',
-        dest = 'salt',
-        default = [],
-        help = 'Ignored words that change the command and the outputs.'
-    )
-    parser.add_argument(
-        '--append',
-        type = str,
-        nargs = '*',
-        dest = 'append',
-        default = [],
-        help = 'Files to append to after reading the inputs.'
-    )
-    success = main(parser.parse_args())
-    sys.exit(0 if success else -1)
+    sys.exit(run(sys.argv[1:], Path.cwd(), sys.stderr))

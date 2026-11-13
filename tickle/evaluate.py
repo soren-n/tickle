@@ -1,10 +1,10 @@
 # External module dependencies
+from typing import Any
 from collections.abc import Callable
-from threading import Event, Thread
-from queue import Queue, Empty
+from threading import Condition, RLock, Thread
 
 # Internal module dependencies
-from .util import SingleWriteMultipleReadLock
+from .schedule import Schedule, READY
 from . import log
 
 ###############################################################################
@@ -17,24 +17,74 @@ class TaskError(Exception):
         self.message = message
 
 ###############################################################################
-# Classes
+# Runs
 ###############################################################################
-Work = Callable[[], str | None]
+class Run:
+    """One attempt at performing a task. Work registers how to stop what it
+    started, such as killing a process, and checks whether it was
+    cancelled; info carries what the work wants to keep about the run."""
+
+    def __init__(self, task : 'Task'):
+        self.task = task
+        self.info : dict[str, Any] = {}
+        self._condition = Condition()
+        self._cancelled = False
+        self._on_cancel : list[Callable[[], None]] = []
+
+    def cancelled(self) -> bool:
+        with self._condition: return self._cancelled
+
+    def on_cancel(self, callback : Callable[[], None]):
+        """Call callback when the run is cancelled, at once if it was."""
+        with self._condition:
+            if not self._cancelled:
+                self._on_cancel.append(callback)
+                return
+        callback()
+
+    def cancel(self):
+        with self._condition:
+            if self._cancelled: return
+            self._cancelled = True
+            callbacks = list(self._on_cancel)
+            self._on_cancel = []
+        for callback in callbacks:
+            try: callback()
+            except Exception as error:
+                log.error('Failed stopping "%s": %s: %s' % (
+                    self.task.description, type(error).__name__, error
+                ))
+
+###############################################################################
+# Tasks
+###############################################################################
+Work = Callable[[Run], str | None]
+
 class Task:
     def __init__(self,
         flows : dict[str, int],
         work : Work,
         force : bool = False,
-        description : str = ''
+        description : str = '',
+        key : str = '',
+        pool : str = '',
+        retries : int = 0,
+        weight : float = 1.0
         ):
         self.description : str = description
+        # Identifies the task across graphs, so a run started under one
+        # schedule can count in the next
+        self.key : str = key
         self._valid : bool = False
         self._active : bool = True
         self._force : bool = force
-        self._deps : set[Task] = set()
-        self._refs : set[Task] = set()
+        self._deps : set['Task'] = set()
+        self._refs : set['Task'] = set()
         self._flows : dict[str, int] = flows
         self._work : Work = work
+        self._pool = pool
+        self._retries = retries
+        self._weight = weight
 
     def __hash__(self):
         return hash(id(self))
@@ -47,6 +97,15 @@ class Task:
 
     def get_flows(self):
         return self._flows
+
+    def get_pool(self) -> str:
+        return self._pool
+
+    def get_retries(self) -> int:
+        return self._retries
+
+    def get_weight(self) -> float:
+        return self._weight
 
     def get_valid(self):
         if self._force: return False
@@ -76,224 +135,198 @@ class Task:
     def add_dependencies(self, others : list['Task']):
         for other in others: self.add_dependency(other)
 
-    def remove_dependency(self, other : 'Task'):
-        if other not in self._deps: return
-        self._deps.remove(other)
-        other._refs.remove(self)
+    def perform(self, run : Run) -> str | None:
+        return self._work(run)
 
-    def remove_dependencies(self, others : list['Task']):
-        for other in others:
-            if other not in self._deps: continue
-            self._deps.remove(other)
-            other._refs.remove(self)
+###############################################################################
+# Evaluator
+###############################################################################
+# How long the main loop and idle workers wait before checking again; every
+# change of state wakes them at once, so this only bounds how late Ctrl-C is
+# noticed where waiting cannot be interrupted (Windows)
+_IDLE_INTERVAL = 0.25
 
-    def clear_dependencies(self):
-        for other in self._deps:
-            other._refs.remove(self)
-        self._deps = set()
-
-    def perform(self) -> str | None:
-        return self._work()
-
-class Worker(Thread):
-    def __init__(self,
-        dequeue : Callable[[Callable[[list[Task]], None]], None],
-        index : int
-        ):
-        super().__init__()
-        self._dequeue = dequeue
-        self._index = index
-        # Set by stop(), which may be called before run() is scheduled; a
-        # flag that run() initialised itself could then overwrite the stop
-        # and leave the worker looping forever.
-        self._stopped = Event()
-
-    def _work(self, sequence : list[Task]):
-        for task in sequence:
-            try: output = task.perform()
-            except TaskError: raise
-            except Exception as error:
-                # Report the failure against the task that raised it
-                raise TaskError(
-                    task.description or 'unknown',
-                    '%s: %s' % (type(error).__name__, error)
-                ) from error
-            if output: log.debug('Worker %d: %s' % (self._index, output))
-
-    def run(self):
-        while not self._stopped.is_set():
-            self._dequeue(self._work)
-
-    def stop(self):
-        self._stopped.set()
-
-Batch = list[Task]
-Program = list[list[Batch]]
-
-# How long an idle worker waits for work before checking whether it was
-# stopped, and how long the idle main loop waits before checking again;
-# reprogramming and stopping wake the main loop at once.
-_POLL_INTERVAL = 0.05
-_IDLE_INTERVAL = 1.0
+Keep = Callable[[Run, Task], bool]
 
 class Evaluator:
-    def __init__(self, worker_count : int):
-        self._running : bool = False
-        self._paused : bool = False
-        self._program : Program = []
-        # Each program gets a new generation; an error is tagged with the
-        # generation of the program its task belonged to, so a failure in
-        # an old program never cancels the program that replaced it.
-        self._generation : int = 0
-        self._queue : Queue[tuple[int, list[Task]]] = Queue()
-        self._exception : Queue[tuple[int, TaskError]] = Queue()
-        self._pause = SingleWriteMultipleReadLock()
-        self._wake = Event()
-        # Set by stop(), from any thread and possibly before start(); once
-        # set, workers start nothing more, so stopping waits only for the
-        # tasks already running, not for the rest of their batch
-        self._stopping = Event()
+    """Runs the tasks of a schedule on worker threads. Workers take the next
+    ready task as soon as one is free, so a task starts the moment what it
+    waits for has finished. install() replaces the schedule at any time,
+    without waiting for running tasks: a running task that the new schedule
+    would start now, and that keep() accepts, carries on and counts in it;
+    any other running task is cancelled."""
+
+    def __init__(self,
+        worker_count : int,
+        pools : dict[str, int] | None = None,
+        keep_going : bool = False
+        ):
+        self._worker_count = max(1, worker_count)
+        self._pools : dict[str, int] = dict(pools or {})
+        self._keep_going = keep_going
+        self._condition = Condition(RLock())
+        self._schedule : Schedule | None = None
+        self._finished : Schedule | None = None
+        self._running : dict[Run, tuple[Schedule | None, Task]] = {}
+        self._started = False
+        self._stopping = False
         self._workers = [
-            Worker(self._dequeue, index + 1)
-            for index in range(max(1, worker_count))
+            Thread(target = self._work, name = 'tickle-worker-%d' % (index + 1))
+            for index in range(self._worker_count)
         ]
 
-    def _dequeue(self, perform : Callable[[list[Task]], None]):
-        # Workers hold the read side of the pause lock while they take and
-        # perform a sequence, so pause() waits for running sequences.
-        self._pause.acquire_read()
-        try:
-            try: generation, work = self._queue.get(timeout = _POLL_INTERVAL)
-            except Empty: return
-            try:
-                if not self._stopping.is_set(): perform(work)
-            except Exception as error:
-                # Any other failure must still be reported and accounted
-                # for, or the main loop would wait for the batch forever.
-                if not isinstance(error, TaskError):
-                    error = TaskError(
-                        'unknown', '%s: %s' % (type(error).__name__, error)
-                    )
-                self._failed(error)
-                self._exception.put((generation, error))
-            finally:
-                self._queue.task_done()
-                self._wake.set()
-        finally:
-            self._pause.release_read()
+    ###########################################################################
+    # Configuration
+    ###########################################################################
+    def set_pools(self, pools : dict[str, int]):
+        with self._condition: self._pools = dict(pools)
 
-    def _check(self) -> set[int]:
-        # Report every error that arrived, and return the generations of the
-        # programs they came from; those programs must be dropped.
-        failed : set[int] = set()
-        while True:
-            try: generation, error = self._exception.get(block = False)
-            except Empty: return failed
-            self._exception.task_done()
-            failed.add(generation)
-            self.on_task_error(error)
+    def make_schedule(self,
+        tasks : list[Task],
+        wanted : set[Task] | None = None
+        ) -> Schedule:
+        with self._condition: pools = dict(self._pools)
+        return Schedule(
+            tasks, self._worker_count, pools, self._keep_going, wanted
+        )
 
-    def _failed(self, error : TaskError):
-        # Report a failure at once, from the worker, rather than when the
-        # main loop gets to it after the rest of the batch
-        try: self.on_task_failed(error)
-        except Exception as report_error:
-            log.error('Failed reporting a task error: %s: %s' % (
-                type(report_error).__name__, report_error
-            ))
+    def install(self, schedule : Schedule, keep : Keep | None = None):
+        """Make schedule the current one; see the class description."""
+        with self._condition:
+            by_key = { task.key : task for task in schedule.tasks if task.key }
+            for run, (owner, task) in list(self._running.items()):
+                if owner is None: continue
+                successor = by_key.get(task.key) if task.key else None
+                if (successor is not None
+                    and schedule.can_adopt(successor)
+                    and (keep is None or keep(run, successor))):
+                    schedule.adopt(successor)
+                    self._running[run] = (schedule, successor)
+                    continue
+                self._running[run] = (None, task)
+                run.cancel()
+            self._schedule = schedule
+            self._condition.notify_all()
 
-    def on_task_failed(self, error : TaskError) -> None:
+    def schedule(self) -> Schedule | None:
+        with self._condition: return self._schedule
+
+    def runs(self) -> list[Run]:
+        """The runs of the current tasks that are running now."""
+        with self._condition:
+            return [
+                run for run, (owner, _) in self._running.items()
+                if owner is not None
+            ]
+
+    ###########################################################################
+    # Callbacks
+    ###########################################################################
+    def on_task_failed(self, error : TaskError, retrying : bool) -> None:
         """Called on the worker thread as soon as a task fails."""
         pass
 
-    def on_task_error(self, error : TaskError) -> None:
-        """Called by the main loop for each failure; ends the evaluation
-        by default."""
-        raise error
-
-    def on_idle(self) -> None:
-        """Called by the main loop when it has nothing to queue."""
+    def on_finished(self, schedule : Schedule) -> None:
+        """Called by the main loop once a schedule has nothing running and
+        nothing more to start."""
         pass
 
-    def _next_batch(self) -> list[Batch] | None:
-        # Reprogramming happens under the write side of the pause lock, so
-        # taking the batch under the read side never queues a stale one.
-        self._pause.acquire_read()
-        try:
-            if len(self._program) == 0: return None
-            batch = self._program.pop(0)
-            for sequence in batch:
-                self._queue.put((self._generation, sequence))
-            return batch
-        finally:
-            self._pause.release_read()
+    ###########################################################################
+    # Workers
+    ###########################################################################
+    def _next(self) -> tuple[Run, Schedule, Task] | None:
+        with self._condition:
+            while not self._stopping:
+                schedule = self._schedule
+                task = schedule.next() if schedule is not None else None
+                if schedule is not None and task is not None:
+                    run = Run(task)
+                    self._running[run] = (schedule, task)
+                    return run, schedule, task
+                self._condition.wait(_IDLE_INTERVAL)
+            return None
 
+    def _work(self):
+        while True:
+            taken = self._next()
+            if taken is None: return
+            run, _, task = taken
+            error : TaskError | None = None
+            try:
+                output = task.perform(run)
+                if output: log.debug('%s: %s' % (task.description, output))
+            except TaskError as task_error:
+                error = task_error
+            except Exception as other_error:
+                # Any failure must end up recorded, or the schedule would
+                # wait for this task forever
+                error = TaskError(
+                    task.description or 'unknown',
+                    '%s: %s' % (type(other_error).__name__, other_error)
+                )
+            state = None
+            with self._condition:
+                owner, owned = self._running.pop(run)
+                if owner is not None and run.cancelled():
+                    owner.cancel(owned)
+                elif owner is not None:
+                    state = owner.finish(owned, error is None)
+                self._condition.notify_all()
+            if error is not None and state is not None:
+                try: self.on_task_failed(error, state == READY)
+                except Exception as report_error:
+                    log.error('Failed reporting a task error: %s: %s' % (
+                        type(report_error).__name__, report_error
+                    ))
+
+    ###########################################################################
+    # Main loop
+    ###########################################################################
     def start(self):
         log.debug('Evaluator.start()')
-        if self._running:
-            raise RuntimeError('Evaluator can not start if already running!')
-        self._running = True
-
-        # Main loop
+        with self._condition:
+            if self._started:
+                raise RuntimeError('Evaluator can not start twice!')
+            self._started = True
         for worker in self._workers: worker.start()
         try:
-            while not self._stopping.is_set():
-                self._wake.clear()
-                failed = self._check()
-                if self._generation in failed and len(self._program) != 0:
-                    # Check again once paused: a new program may have been
-                    # installed while waiting, and must not be dropped
-                    self.pause()
-                    try:
-                        if self._generation in failed: self.deprogram()
-                    finally: self.resume()
-                if self._next_batch() is None:
-                    self.on_idle()
-                    self._wake.wait(_IDLE_INTERVAL)
-                    continue
-                self._queue.join()
+            while True:
+                finished : Schedule | None = None
+                with self._condition:
+                    if self._stopping: break
+                    schedule = self._schedule
+                    if (schedule is not None
+                        and schedule is not self._finished
+                        and schedule.finished()):
+                        self._finished = schedule
+                        finished = schedule
+                    else:
+                        self._condition.wait(_IDLE_INTERVAL)
+                if finished is not None: self.on_finished(finished)
+        except BaseException:
+            # Interrupted: stop what runs rather than wait for it
+            self.cancel()
+            raise
         finally:
-            self._running = False
-            for worker in self._workers: worker.stop()
+            with self._condition:
+                self._stopping = True
+                self._condition.notify_all()
             for worker in self._workers: worker.join()
 
-    def pause(self):
-        log.debug('Evaluator.pause()')
-        self._pause.acquire_write()
-        self._paused = True
+    def cancel(self):
+        """Cancel every running task, and start nothing more."""
+        with self._condition:
+            if self._schedule is not None: self._schedule.stopped = True
+            runs = list(self._running.keys())
+            self._condition.notify_all()
+        for run in runs: run.cancel()
 
-    def _clear_queue(self):
-        while True:
-            try: self._queue.get(block = False)
-            except Empty: break
-            self._queue.task_done()
-
-    def reprogram(self, program : Program):
-        log.debug('Evaluator.reprogram()')
-        if self._running and not self._paused:
-            raise RuntimeError('Evaluator must be paused prior to reprogramming!')
-        self._clear_queue()
-        self._generation += 1
-        self._program = program
-        self._wake.set()
-
-    def deprogram(self):
-        log.debug('Evaluator.deprogram()')
-        if self._running and not self._paused:
-            raise RuntimeError('Evaluator must be paused prior to deprogramming!')
-        self._clear_queue()
-        self._program = list()
-
-    def resume(self):
-        log.debug('Evaluator.resume()')
-        if not self._paused:
-            raise RuntimeError('Evaluator can not resume if not paused!')
-        self._paused = False
-        self._pause.release_write()
-
-    def stop(self):
-        # Safe to call more than once, and from any thread, including a
-        # worker performing the task that ends the evaluation.
+    def stop(self, cancel : bool = False):
+        """End the evaluation, from any thread, more than once, also before
+        start(); nothing more starts, and running tasks finish first unless
+        cancel is set."""
         log.debug('Evaluator.stop()')
-        self._stopping.set()
-        self._wake.set()
+        if cancel: self.cancel()
+        with self._condition:
+            self._stopping = True
+            self._condition.notify_all()

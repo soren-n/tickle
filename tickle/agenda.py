@@ -13,20 +13,35 @@ from . import dataspec
 ###############################################################################
 # Datatypes
 ###############################################################################
+# Fields added after 0.5.0 are left out of a stored agenda while they hold
+# their default, so agendas that do not use them look as they did
+_NEW = { 'omit_default': True }
+
 @dataclass
 class Task:
     desc: str
     proc: str
-    flows: list[str]
-    args: dict[str, list[str]]
-    inputs: list[str]
-    outputs: list[str]
+    flows: list[str] = field(default_factory = list)
+    args: dict[str, list[str]] = field(default_factory = dict)
+    inputs: list[str] = field(default_factory = list)
+    outputs: list[str] = field(default_factory = list)
+    # Name of a pool in Agenda.pools limiting how many of its tasks run at
+    # once; '' for none
+    pool: str = field(default = '', metadata = _NEW)
+    # Seconds the task may run before it is stopped and fails; 0 for no limit
+    timeout: float = field(default = 0.0, metadata = _NEW)
+    # How many times a failing task is run again before it counts as failed
+    retries: int = field(default = 0, metadata = _NEW)
+    # Run on every run; only for tasks without outputs
+    always: bool = field(default = False, metadata = _NEW)
 
 @dataclass
 class Agenda:
     procs: dict[str, list[str]] = field(default_factory = dict)
     flows: dict[str, list[list[str]]] = field(default_factory = dict)
     tasks: list[Task] = field(default_factory = list)
+    # Pool name to how many of its tasks may run at once
+    pools: dict[str, int] = field(default_factory = dict, metadata = _NEW)
 
 @dataclass
 class CompiledTask:
@@ -36,6 +51,10 @@ class CompiledTask:
     command: list[str]
     inputs: set[Path]
     outputs: set[Path]
+    pool: str = ''
+    timeout: float = 0.0
+    retries: int = 0
+    always: bool = False
 
 CompiledAgenda = list[CompiledTask]
 
@@ -155,9 +174,32 @@ def compile(target_dir : Path, agenda_data : Agenda) -> CompiledAgenda:
                 )
             ) from error
 
+    # Pools
+    for pool, depth in agenda_data.pools.items():
+        if pool == '':
+            raise RuntimeError('A pool must have a name; found a pool named ""')
+        if depth < 1:
+            raise RuntimeError(
+                'Pool \"%s\" must allow at least one task, not %d' % (pool, depth)
+            )
+
     # Parse tasks
     agenda : CompiledAgenda = []
     for task_data in agenda_data.tasks:
+        if task_data.pool != '' and task_data.pool not in agenda_data.pools:
+            raise RuntimeError('Undefined pool \"%s\" for task \"%s\"' % (
+                task_data.pool, task_data.desc
+            ))
+        if task_data.timeout < 0:
+            raise RuntimeError('Negative timeout for task \"%s\"' % task_data.desc)
+        if task_data.retries < 0:
+            raise RuntimeError('Negative retries for task \"%s\"' % task_data.desc)
+        if task_data.always and len(task_data.outputs) != 0:
+            raise RuntimeError(
+                'Task \"%s\" runs always, so it can not have outputs' % (
+                    task_data.desc
+                )
+            )
         if task_data.proc not in procs:
             raise RuntimeError('Undefined proc \"%s\" for task \"%s\"' % (
                 task_data.proc, task_data.desc
@@ -189,7 +231,11 @@ def compile(target_dir : Path, agenda_data : Agenda) -> CompiledAgenda:
             outputs = {
                 resolve_path(target_dir, output)
                 for output in set(task_data.outputs)
-            }
+            },
+            pool = task_data.pool,
+            timeout = float(task_data.timeout),
+            retries = task_data.retries,
+            always = task_data.always
         ))
 
     # Done

@@ -4,6 +4,10 @@ on:
   push:
     branches: [ main ]
   pull_request:
+  # Nightly, every property on every system and Python, with real processes
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
 
 jobs:
   lint:
@@ -16,20 +20,34 @@ jobs:
       - run: uv run ruff check .
       - run: uv run pyright
 
-  # The property tests need minigun, which needs Python 3.12 or later
+  # The property tests need minigun, which needs Python 3.12 or later. Pushes
+  # and pull requests test both Pythons on Linux and the newest on macOS and
+  # Windows; most properties run the test task in-process, so only those
+  # about processes start them. The nightly run covers the whole matrix with
+  # a real process for every task.
   test:
     strategy:
       fail-fast: false
       matrix:
         os: [ ubuntu-latest, macos-latest, windows-latest ]
         python: [ "3.12", "3.14" ]
+        nightly:
+          - ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+        exclude:
+          - os: macos-latest
+            python: "3.12"
+            nightly: false
+          - os: windows-latest
+            python: "3.12"
+            nightly: false
     runs-on: ${{ matrix.os }}
     # Properties that start processes declare their attempts, which the time
     # budget does not limit; starting a process is slow on Windows, so it
-    # makes a fifth of them (about 45 minutes otherwise)
-    timeout-minutes: 30
+    # makes a fifth of them
+    timeout-minutes: 45
     env:
       TICKLE_TEST_ATTEMPT_SCALE: ${{ matrix.os == 'windows-latest' && '0.2' || '1' }}
+      TICKLE_TEST_PROCESSES: ${{ matrix.nightly && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -55,26 +73,27 @@ jobs:
         with:
           python-version: "3.11"
       - run: uv sync
-      - name: Offline, incremental rerun and clean
+      - name: Offline, incremental rerun, dry run and clean
         run: |
           mkdir smoke && cd smoke
           echo hello > a.txt
           cat > agenda.yaml <<'EOF'
           procs:
             copy: [ python, ../tests/tasks/success.py, -i, $inputs, -o, $outputs ]
-          flows:
-            default: [ [ copy ] ]
           tasks:
           - desc: Copy a.txt
             proc: copy
             args: { inputs: [ a.txt ], outputs: [ out/b.txt ] }
-            flows: [ default ]
             inputs: [ a.txt ]
             outputs: [ out/b.txt ]
           EOF
           uv run tickle offline
           test -f out/b.txt
+          test -f tickle-logs/*.log
           # Nothing changed, so the second run performs no task
           ! uv run tickle offline | grep -q "Copy a.txt"
+          echo changed > a.txt
+          uv run tickle --dry-run offline | grep -q 'Would run "Copy a.txt"'
           uv run tickle clean
           test ! -e out/b.txt
+          test ! -e tickle-logs

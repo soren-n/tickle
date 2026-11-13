@@ -37,7 +37,10 @@ def _nearest_existing(dir_path : Path) -> Path:
 class FileWatcher(FileSystemEventHandler):
     """Calls a callback when a subscribed file changes. Watches each file's
     folder; while that folder does not exist, it watches the nearest folder
-    above it that does, and moves down as the missing folders appear."""
+    above it that does, and moves down as the missing folders appear, and
+    up again when they go away. A watched folder that is replaced, deleted
+    and created again or renamed over, is watched again, since the old
+    watch may follow the folder that went away."""
 
     def __init__(self):
         super().__init__()
@@ -58,7 +61,9 @@ class FileWatcher(FileSystemEventHandler):
     def _unwatch(self, dir_path : Path):
         self._watch_count[dir_path] -= 1
         if self._watch_count[dir_path] != 0: return
-        self._observer.unschedule(self._watch_objs[dir_path])
+        # The watch of a folder that was deleted may be gone already
+        try: self._observer.unschedule(self._watch_objs[dir_path])
+        except Exception: pass
         del self._watch_objs[dir_path]
         del self._watch_count[dir_path]
 
@@ -78,19 +83,40 @@ class FileWatcher(FileSystemEventHandler):
             del self._callbacks[_file_path]
             self._unwatch(self._watched.pop(_file_path))
 
-    def _descend(self) -> list[tuple[EventHandler, Event]]:
-        # Move the watches of files whose folders were missing down to the
-        # nearest folder that exists now. A file may have been created
-        # before its folder was watched, so report the files that exist.
+    def _refresh(self, dir_path : Path):
+        # Watch a folder again, in case its watch followed a folder that
+        # was deleted or renamed away
+        watch = self._watch_objs.get(dir_path)
+        if watch is None: return
+        try: self._observer.unschedule(watch)
+        except Exception: pass
+        try: self._watch_objs[dir_path] = self._observer.schedule(self, str(dir_path))
+        except Exception as error:
+            log.debug('FileWatcher: could not watch %s again: %s' % (dir_path, error))
+
+    def _reanchor(self, paths : list[Path]) -> list[tuple[EventHandler, Event]]:
+        # Move each file's watch to the nearest folder that exists now, down
+        # as folders appear and up as they go away, and watch again a folder
+        # that a directory event touched. A file may have changed while it
+        # was not watched, so report the files that exist; their callbacks
+        # judge by content.
         result : list[tuple[EventHandler, Event]] = []
         with self._lock:
+            refreshed : set[Path] = set()
             for file_path, dir_path in list(self._watched.items()):
-                if dir_path == file_path.parent: continue
                 nearest = _nearest_existing(file_path.parent)
-                if nearest == dir_path: continue
-                self._watch(nearest)
-                self._unwatch(dir_path)
-                self._watched[file_path] = nearest
+                touched = any(
+                    path == dir_path or path in dir_path.parents
+                    for path in paths
+                )
+                if nearest == dir_path and not touched: continue
+                if nearest != dir_path:
+                    self._watch(nearest)
+                    self._unwatch(dir_path)
+                    self._watched[file_path] = nearest
+                elif nearest not in refreshed:
+                    refreshed.add(nearest)
+                    self._refresh(nearest)
                 if file_path.exists():
                     result.append((self._callbacks[file_path], Event.Created))
         return result
@@ -116,7 +142,11 @@ class FileWatcher(FileSystemEventHandler):
         if kind is None: return
         calls : list[tuple[EventHandler, Event]] = []
         if event.is_directory:
-            calls = self._descend()
+            calls = self._reanchor([
+                Path(str(path))
+                for path in (event.src_path, getattr(event, 'dest_path', ''))
+                if path
+            ])
         else:
             # A move reports the old path as the source and the new one as
             # the destination; saving by renaming a new file over the

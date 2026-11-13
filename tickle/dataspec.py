@@ -1,14 +1,13 @@
 # External module dependencies
-from dataclasses import is_dataclass
+from dataclasses import fields, is_dataclass, MISSING
 from typing import cast, get_origin, get_args, Any, Union
 from collections.abc import Callable
-from inspect import signature
 
 ###############################################################################
 # Type
 ###############################################################################
 DataspecValue = Union[
-    int, float, str,
+    bool, int, float, str,
     'Dataspec'
 ]
 Dataspec = Union[
@@ -19,17 +18,42 @@ Dataspec = Union[
 ###############################################################################
 # Functions
 ###############################################################################
-# The fields of each dataclass, as (name, type); looking up the signature
-# for every value took half the time of decoding a large agenda
-_FIELDS : dict[type, list[tuple[str, Any]]] = {}
+class _Field:
+    """A field of a dataclass: its name, its type, how to make its default
+    when a document leaves it out (None if it is required), and whether to
+    leave it out of an encoded document while it holds its default."""
+    __slots__ = ('name', 'type', 'default', 'omit_default')
 
-def _fields(T : type) -> list[tuple[str, Any]]:
+    def __init__(self,
+        name : str, type : Any,
+        default : Callable[[], Any] | None, omit_default : bool
+        ):
+        self.name = name
+        self.type = type
+        self.default = default
+        self.omit_default = omit_default
+
+# The fields of each dataclass; looking them up for every value took half
+# the time of decoding a large agenda
+_FIELDS : dict[type, list[_Field]] = {}
+
+def _fields(T : type) -> list[_Field]:
     if T not in _FIELDS:
-        _FIELDS[T] = [
-            (name, parameter.annotation)
-            for name, parameter in signature(T).parameters.items()
-        ]
+        result : list[_Field] = []
+        for item in fields(cast(Any, T)):
+            default : Callable[[], Any] | None = None
+            if item.default is not MISSING:
+                default = (lambda value = item.default: value)
+            elif item.default_factory is not MISSING:
+                default = item.default_factory
+            result.append(_Field(
+                item.name, item.type, default,
+                bool(item.metadata.get('omit_default', False))
+            ))
+        _FIELDS[T] = result
     return _FIELDS[T]
+
+_SIMPLE = [bool, str, int, float]
 
 class DecodeError(TypeError):
     """A value that does not fit its type, with where it was found."""
@@ -52,7 +76,7 @@ def _at(where : str, decode : Callable[[], Any]) -> Any:
 
 def decode(T : type, value : Any) -> Any:
     def _value(T : type, value : Any) -> Any:
-        if T in [str, int, float]: return _simple(T, value)
+        if T in _SIMPLE: return _simple(T, value)
         return _document(T, value)
 
     def _composite(T : type, value : Any) -> Any:
@@ -70,17 +94,22 @@ def decode(T : type, value : Any) -> Any:
                 type(value).__name__, str(value)
             ))
         result = {}
-        for l, t in _fields(T):
-            if l not in value:
-                raise TypeError('Expected dict to define field %s' % l)
-            result[l] = _at('.%s' % l, (
-                lambda t = t, l = l: _value(t, value[l])
+        for item in _fields(T):
+            if item.name not in value:
+                if item.default is None:
+                    raise TypeError('Expected dict to define field %s' % item.name)
+                result[item.name] = item.default()
+                continue
+            result[item.name] = _at('.%s' % item.name, (
+                lambda item = item: _value(item.type, value[item.name])
             ))
         return T(**result)
 
     def _simple(T : type, value : Any) -> Any:
             S = type(value)
             if T == S: return value
+            # YAML writes a whole number of seconds without a fraction
+            if T == float and S == int: return float(value)
             raise TypeError(
                 'Expected a type of %s but got %s for value \"%s\"' % (
                 T.__name__, S.__name__, str(value)
@@ -135,7 +164,7 @@ def decode(T : type, value : Any) -> Any:
 
 def encode(T : type, value : Any) -> Dataspec:
     def _value(T : type, value : Any) -> Any:
-        if T in [str, int, float]: return _simple(T, value)
+        if T in _SIMPLE: return _simple(T, value)
         return _document(T, value)
 
     def _composite(T : type, value : Any) -> Any:
@@ -148,15 +177,20 @@ def encode(T : type, value : Any) -> Dataspec:
     def _document(T : type, value : Any) -> Any:
         if not is_dataclass(T): return _composite(T, value)
         result : dict[str, Any] = {}
-        for l, t in _fields(T):
-            if l not in value.__dict__:
-                raise TypeError('Expected dataclass to define field %s' % l)
-            result[l] = _value(t, value.__dict__[l])
+        for item in _fields(T):
+            if item.name not in value.__dict__:
+                raise TypeError('Expected dataclass to define field %s' % item.name)
+            field_value = value.__dict__[item.name]
+            if (item.omit_default and item.default is not None
+                and field_value == item.default()):
+                continue
+            result[item.name] = _value(item.type, field_value)
         return result
 
     def _simple(T : type, value : Any) -> Any:
         S = type(value)
         if T == S: return value
+        if T == float and S == int: return float(value)
         raise TypeError(
             'Expected a type of %s but got %s for value \"%s\"' % (
             T.__name__, S.__name__, str(value)

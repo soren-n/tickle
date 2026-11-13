@@ -14,6 +14,14 @@ from . import log
 def default_log_path(dir_path : Path = Path('./')) -> Path:
     return Path(dir_path, 'tickle.log')
 
+class _Terminated(KeyboardInterrupt):
+    """Raised in the main thread on SIGTERM, which then ends tickle the way
+    Ctrl-C does: running tasks are stopped and the cache is written."""
+    pass
+
+def _raise_terminated(*args : Any):
+    raise _Terminated()
+
 ###############################################################################
 # Main entry
 ###############################################################################
@@ -34,7 +42,8 @@ def main():
         # directory, and the ones it writes need a folder to go in
         for name, value in [
             ('agenda', args.agenda), ('depend', args.depend),
-            ('cache', args.cache), ('log', args.log)
+            ('cache', args.cache), ('log', args.log),
+            ('log folder', args.log_dir)
         ]:
             file_path = Path(cwd, value)
             if not file_path.resolve().is_relative_to(cwd.resolve()):
@@ -46,6 +55,11 @@ def main():
                 ))
             if name in ['cache', 'log'] and file_path.is_dir():
                 parser.error('the %s file %s is a folder' % (name, value))
+            if name == 'log folder' and file_path.exists() and not file_path.is_dir():
+                parser.error('the log folder %s is a file' % value)
+        targets = args.targets if len(args.targets) != 0 else None
+        if args.mode in ['clean', 'version'] and targets is not None:
+            parser.error('%s mode takes no targets' % args.mode)
 
         # Handle logging
         logging.basicConfig(
@@ -57,20 +71,25 @@ def main():
 
         # Run specified mode
         if args.mode == 'offline':
+            signal.signal(signal.SIGTERM, _raise_terminated)
             try:
-                success = api.offline(
+                result = api.offline(
                     cwd,
                     Path(cwd, args.agenda),
                     Path(cwd, args.depend),
                     Path(cwd, args.cache),
-                    args.workers
+                    args.workers,
+                    keep_going = args.keep_going,
+                    targets = targets,
+                    dry_run = args.dry_run,
+                    log_dir = Path(cwd, args.log_dir)
                 )
-            except KeyboardInterrupt:
-                # Tasks that did not finish are not recorded, so the next
-                # run performs them again
+            except KeyboardInterrupt as interrupt:
+                # Running tasks were stopped; tasks that did not finish are
+                # not recorded, so the next run performs them again
                 log.info('Interrupted; unfinished tasks run again next time')
-                return 130
-            return 0 if success else 1
+                return 143 if isinstance(interrupt, _Terminated) else 130
+            return 0 if result else 1
         if args.mode == 'online':
 
             # Make evaluator
@@ -79,13 +98,16 @@ def main():
                 Path(cwd, args.agenda),
                 Path(cwd, args.depend),
                 Path(cwd, args.cache),
-                args.workers
+                args.workers,
+                keep_going = not args.stop_on_failure,
+                targets = targets,
+                log_dir = Path(cwd, args.log_dir)
             )
             if evaluator is None: return 1
 
-            # Setup user termination
+            # Setup user termination; running tasks are stopped
             def _terminate(*args : Any):
-                log.info('Stopping; waiting for running tasks ...')
+                log.info('Stopping ...')
                 evaluator.stop()
 
             signal.signal(signal.SIGINT, _terminate)
@@ -117,6 +139,35 @@ def main():
         'mode', type = str,
         choices = ['offline', 'online', 'clean', 'version'],
         help = 'Offline mode for an inattentive evaluation mode where file modifications are ignored once tasks have been scheduled. Online mode for an attentive evaluation mode where file creations or modifications trigger a rescheduling of the task graph. Clean mode will delete the files and folders generated during offline or online evaluation, keeping files that are now sources or that changed since they were generated. Version mode will print the tool version.'
+    )
+    parser.add_argument(
+        'targets', nargs = '*', metavar = 'TARGET',
+        help = 'Run only what these need: task descriptions or output files; all tasks if none are given'
+    )
+    parser.add_argument(
+        '-k', '--keep-going',
+        dest = 'keep_going',
+        action = 'store_true',
+        help = 'Offline mode: after a task fails, keep running the tasks that do not read from it'
+    )
+    parser.add_argument(
+        '--stop-on-failure',
+        dest = 'stop_on_failure',
+        action = 'store_true',
+        help = 'Online mode: after a task fails, start nothing more until the next change'
+    )
+    parser.add_argument(
+        '-n', '--dry-run',
+        dest = 'dry_run',
+        action = 'store_true',
+        help = 'Offline mode: print the tasks that would run, without running them'
+    )
+    parser.add_argument(
+        '--log-dir',
+        type = str,
+        dest = 'log_dir',
+        default = api.default_log_dir(),
+        help = 'Folder for the output of each task, one log file per task; must be inside the current working directory'
     )
     parser.add_argument(
         '--debug',
