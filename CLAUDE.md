@@ -12,7 +12,7 @@ User documentation is in `README.md`. Further docs:
 
 ```
 uv sync                                  # create .venv with runtime and dev dependencies
-uv run minigun --time-budget 60          # run the property tests (about 10 minutes; see Testing)
+uv run minigun --time-budget 60          # run the property tests (about 4 minutes; see Testing)
 uv run minigun --time-budget 10 --select "encode"   # run the properties whose description matches
 uv run ruff check . && uv run pyright   # lint (bug rules only) and type check
 uv run tickle offline                    # run the CLI in the current directory

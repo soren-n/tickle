@@ -328,7 +328,7 @@ $ uv sync
 $ uv run minigun --time-budget 60
 ```
 
-A run takes about ten minutes, mostly in properties that run agendas and so start many processes; their attempt counts are not limited by the time budget. Set `TICKLE_TEST_ATTEMPT_SCALE` (for example to `0.2`) to make fewer attempts, as CI does on Windows, and use `--select` with part of a property's description to run only matching properties.
+A run takes about four minutes. Most properties run the test task in-process; those about processes themselves start real ones, and their attempt counts are not limited by the time budget. Set `TICKLE_TEST_PROCESSES=1` to start a real process for every task, as the nightly CI run does (about eight minutes). Set `TICKLE_TEST_ATTEMPT_SCALE` (for example to `0.2`) to make fewer attempts, as CI does on Windows, and use `--select` with part of a property's description to run only matching properties.
 
 The code is checked with ruff, for bugs only since the project keeps its own formatting, and with pyright:
 ```
