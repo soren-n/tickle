@@ -2585,6 +2585,32 @@ def _watcher_reanchors(how: str) -> bool:
         watcher.stop()
 
 
+@context(g.one_of(['deleted', 'moved']))
+@prop('The watcher reports a file as deleted when its folder goes away', attempts=_attempts(5))
+def _watcher_folder_gone(how: str) -> bool:
+    """A folder event moves or renews the watches below it, which may lose
+    the events of the old watch, such as a file's deletion; the watcher
+    reports what is there afterwards, a missing file included. The event
+    is handed to the watcher directly, as if the file's own were lost."""
+    import tickle.watch as twatch
+    from watchdog.events import DirDeletedEvent, DirMovedEvent
+    test_path = _fixture_path()
+    folder = test_path / 'src'
+    folder.mkdir()
+    (folder / 'file.txt').write_text('first')
+    events: list[str] = []
+    watcher = twatch.FileWatcher()
+    watcher.subscribe(folder / 'file.txt', lambda event: events.append(event.value))
+    if how == 'deleted':
+        shutil.rmtree(folder)
+        watcher.on_any_event(DirDeletedEvent(str(folder)))
+    else:
+        os.rename(folder, test_path / 'other')
+        watcher.on_any_event(DirMovedEvent(str(folder), str(test_path / 'other')))
+    watcher.stop()
+    return events == ['Deleted']
+
+
 def _inotify_count() -> int | None:
     """The inotify instances this process holds, where /proc shows them."""
     fd_dir = Path('/proc/self/fd')
@@ -3134,6 +3160,7 @@ spec = conj(
     _agenda_evaluate_offline_task_log,
     _agenda_evaluate_online_adopts,
     _watcher_reanchors,
+    _watcher_folder_gone,
     _agenda_evaluate_watchers_released,
     _agenda_evaluate_offline_folder_output,
     _agenda_evaluate_offline_folder_input,

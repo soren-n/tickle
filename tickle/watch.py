@@ -31,6 +31,12 @@ def _nearest_existing(dir_path : Path) -> Path:
         dir_path = dir_path.parent
     return dir_path
 
+def _identity(dir_path : Path) -> tuple[int, int] | None:
+    # Which folder a path names, to tell a folder replaced by another
+    try: stat = dir_path.stat()
+    except OSError: return None
+    return stat.st_dev, stat.st_ino
+
 ###############################################################################
 # Classes
 ###############################################################################
@@ -67,6 +73,7 @@ class FileWatcher(FileSystemEventHandler):
         self._subscriptions : dict[Path, _Subscription] = {}
         self._watch_objs : dict[Watch, ObservedWatch] = {}
         self._watch_count : dict[Watch, int] = {}
+        self._watch_ids : dict[Watch, tuple[int, int] | None] = {}
 
     def _watch(self, watch : Watch):
         if watch in self._watch_count:
@@ -78,12 +85,23 @@ class FileWatcher(FileSystemEventHandler):
     def _schedule(self, watch : Watch):
         assert self._observer is not None
         dir_path, recursive = watch
+        self._watch_ids[watch] = _identity(dir_path)
         self._watch_objs[watch] = self._observer.schedule(
             self, str(dir_path), recursive = recursive
         )
 
+    def _replaced(self, watch : Watch, kind : Event) -> bool:
+        # Whether a folder event may have replaced the watched folder. Some
+        # platforms (Windows) report a folder as modified whenever a file in
+        # it changes; watching it again each time could lose the events of
+        # the old watch, such as that file's deletion. So a modification
+        # renews the watch only when the folder is another one now.
+        if kind != Event.Modified: return True
+        return _identity(watch[0]) != self._watch_ids.get(watch)
+
     def _unschedule(self, watch : Watch):
         # The watch of a folder that was deleted may be gone already
+        self._watch_ids.pop(watch, None)
         old = self._watch_objs.pop(watch, None)
         if old is None or self._observer is None: return
         try: self._observer.unschedule(old)
@@ -127,12 +145,15 @@ class FileWatcher(FileSystemEventHandler):
         except Exception as error:
             log.debug('FileWatcher: could not watch %s again: %s' % (watch[0], error))
 
-    def _reanchor(self, paths : list[Path]) -> list[tuple[EventHandler, Event]]:
+    def _reanchor(self,
+        paths : list[Path],
+        kind : Event
+        ) -> list[tuple[EventHandler, Event]]:
         # Move each watch to the nearest folder that exists now, down as
         # folders appear and up as they go away, and watch again a folder
         # that a directory event touched. Something may have changed while
-        # it was not watched, so report what exists; callbacks judge by
-        # content.
+        # it was not watched, a deletion as well, so report every moved or
+        # touched subscription; callbacks judge by content.
         result : list[tuple[EventHandler, Event]] = []
         with self._lock:
             refreshed : set[Watch] = set()
@@ -148,11 +169,13 @@ class FileWatcher(FileSystemEventHandler):
                     self._watch(watch)
                     self._unwatch(subscription.watch)
                     subscription.watch = watch
-                elif watch not in refreshed:
+                elif watch not in refreshed and self._replaced(watch, kind):
                     refreshed.add(watch)
                     self._refresh(watch)
-                if path.exists():
-                    result.append((subscription.callback, Event.Created))
+                result.append((
+                    subscription.callback,
+                    Event.Created if path.exists() else Event.Deleted
+                ))
         return result
 
     def start(self):
@@ -167,6 +190,7 @@ class FileWatcher(FileSystemEventHandler):
             observer = self._observer
             self._observer = None
             self._watch_objs.clear()
+            self._watch_ids.clear()
         if observer is None: return
         observer.stop()
         observer.join()
@@ -198,7 +222,7 @@ class FileWatcher(FileSystemEventHandler):
             if path
         ]
         if event.is_directory:
-            calls = self._reanchor(paths)
+            calls = self._reanchor(paths, kind)
         # A move reports the old path as the source and the new one as the
         # destination; saving by renaming a new file over the watched one
         # shows up only as such a move on some platforms. A tree hears of
