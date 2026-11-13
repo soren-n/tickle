@@ -5,7 +5,7 @@ from pathlib import Path
 from enum import Enum
 
 # Watchdog module dependencies
-from watchdog.observers.api import ObservedWatch
+from watchdog.observers.api import BaseObserver, ObservedWatch
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 
@@ -53,12 +53,17 @@ class FileWatcher(FileSystemEventHandler):
     does, and moves down as the missing folders appear, and up again when
     they go away. A watched folder that is replaced, deleted and created
     again or renamed over, is watched again, since the old watch may follow
-    the folder that went away."""
+    the folder that went away.
+
+    The observer exists only from start() to stop(): on Linux an observer
+    takes an inotify instance and a thread as soon as it is made, and
+    gives them back only when it is started and stopped, so a watcher that
+    is never started must not make one."""
 
     def __init__(self):
         super().__init__()
         self._lock = RLock()
-        self._observer = Observer()
+        self._observer : BaseObserver | None = None
         self._subscriptions : dict[Path, _Subscription] = {}
         self._watch_objs : dict[Watch, ObservedWatch] = {}
         self._watch_count : dict[Watch, int] = {}
@@ -67,19 +72,27 @@ class FileWatcher(FileSystemEventHandler):
         if watch in self._watch_count:
             self._watch_count[watch] += 1
             return
+        self._watch_count[watch] = 1
+        if self._observer is not None: self._schedule(watch)
+
+    def _schedule(self, watch : Watch):
+        assert self._observer is not None
         dir_path, recursive = watch
         self._watch_objs[watch] = self._observer.schedule(
             self, str(dir_path), recursive = recursive
         )
-        self._watch_count[watch] = 1
+
+    def _unschedule(self, watch : Watch):
+        # The watch of a folder that was deleted may be gone already
+        old = self._watch_objs.pop(watch, None)
+        if old is None or self._observer is None: return
+        try: self._observer.unschedule(old)
+        except Exception: pass
 
     def _unwatch(self, watch : Watch):
         self._watch_count[watch] -= 1
         if self._watch_count[watch] != 0: return
-        # The watch of a folder that was deleted may be gone already
-        try: self._observer.unschedule(self._watch_objs[watch])
-        except Exception: pass
-        del self._watch_objs[watch]
+        self._unschedule(watch)
         del self._watch_count[watch]
 
     def _anchor(self, path : Path, tree : bool) -> Watch:
@@ -108,17 +121,11 @@ class FileWatcher(FileSystemEventHandler):
     def _refresh(self, watch : Watch):
         # Watch a folder again, in case its watch followed a folder that
         # was deleted or renamed away
-        old = self._watch_objs.get(watch)
-        if old is None: return
-        try: self._observer.unschedule(old)
-        except Exception: pass
-        dir_path, recursive = watch
-        try:
-            self._watch_objs[watch] = self._observer.schedule(
-                self, str(dir_path), recursive = recursive
-            )
+        if self._observer is None or watch not in self._watch_count: return
+        self._unschedule(watch)
+        try: self._schedule(watch)
         except Exception as error:
-            log.debug('FileWatcher: could not watch %s again: %s' % (dir_path, error))
+            log.debug('FileWatcher: could not watch %s again: %s' % (watch[0], error))
 
     def _reanchor(self, paths : list[Path]) -> list[tuple[EventHandler, Event]]:
         # Move each watch to the nearest folder that exists now, down as
@@ -149,11 +156,20 @@ class FileWatcher(FileSystemEventHandler):
         return result
 
     def start(self):
-        self._observer.start()
+        with self._lock:
+            assert self._observer is None
+            self._observer = Observer()
+            for watch in self._watch_count: self._schedule(watch)
+            self._observer.start()
 
     def stop(self):
-        self._observer.stop()
-        self._observer.join()
+        with self._lock:
+            observer = self._observer
+            self._observer = None
+            self._watch_objs.clear()
+        if observer is None: return
+        observer.stop()
+        observer.join()
 
     def _callbacks_for(self, path : Path) -> list[EventHandler]:
         # The file's own subscription, and those of trees holding it

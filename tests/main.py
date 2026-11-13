@@ -2585,6 +2585,55 @@ def _watcher_reanchors(how: str) -> bool:
         watcher.stop()
 
 
+def _inotify_count() -> int | None:
+    """The inotify instances this process holds, where /proc shows them."""
+    fd_dir = Path('/proc/self/fd')
+    if not fd_dir.is_dir(): return None
+    count = 0
+    for name in os.listdir(fd_dir):
+        try: target = os.readlink(fd_dir / name)
+        except OSError: continue
+        if target == 'anon_inode:inotify': count += 1
+    return count
+
+
+@context(evaluated_agendas, worker_counts)
+@prop('Every watcher tickle makes is stopped, also when it never runs', attempts=_attempts(10))
+def _agenda_evaluate_watchers_released(agenda: ta.Agenda, workers: int) -> bool:
+    """On Linux a watchdog observer holds an inotify instance and a thread
+    from when it is made until it is started and stopped; a long-lived
+    process running tickle again and again must not run out of either.
+    Dry runs, runs rejected before they start and online evaluators closed
+    without running make watchers too."""
+    import tickle.watch as twatch
+    made: list = []
+    real_observer = twatch.Observer
+
+    def _observer(*args, **kwargs):
+        observer = real_observer(*args, **kwargs)
+        made.append(observer)
+        return observer
+
+    before = _inotify_count()
+    twatch.Observer = _observer  # type: ignore
+    try:
+        test_path = _fixture_path()
+        for dry_run in (True, False, True, False):
+            _run_offline(test_path, agenda, workers, dry_run = dry_run)
+        with _quiet():
+            evaluator = tapi.online(test_path, test_path / 'agenda.yaml', worker_count = workers)
+            if evaluator is not None: evaluator.close()
+        cyclic_path = _fixture_path()
+        tdep.store(cyclic_path / 'depend.yaml', {'a.txt': ['b.txt'], 'b.txt': ['a.txt']})
+        _run_offline(cyclic_path, agenda, workers)
+    finally:
+        twatch.Observer = real_observer
+    if not all(observer.stopped_event.is_set() for observer in made): return False
+    if not all(not observer.is_alive() for observer in made): return False
+    after = _inotify_count()
+    return before is None or after == before
+
+
 ###############################################################################
 # Folders, early cutoff, depfiles and explanations
 ###############################################################################
@@ -3085,6 +3134,7 @@ spec = conj(
     _agenda_evaluate_offline_task_log,
     _agenda_evaluate_online_adopts,
     _watcher_reanchors,
+    _agenda_evaluate_watchers_released,
     _agenda_evaluate_offline_folder_output,
     _agenda_evaluate_offline_folder_input,
     _agenda_evaluate_online_folder,
