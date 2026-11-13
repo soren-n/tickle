@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.5.0
+
 ### Upgrading
 
 The first run after upgrading reruns every task once: the cache has a new format and tasks are identified differently. `tickle clean` still reads the old cache.
