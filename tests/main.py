@@ -1468,12 +1468,16 @@ def _evaluator_starts_when_ready(chain_length: int) -> bool:
 @context(g.int_range(1, 3), g.int_range(2, 4))
 @prop('Stopping the evaluator starts no more tasks', attempts=_attempts(10))
 def _evaluator_stop_starts_nothing(workers: int, factor: int) -> bool:
+    # The tasks run until stop has been called, rather than for a fixed
+    # time, which a slow machine could exceed before stopping and start
+    # the next tasks
     started: list[int] = []
     lock = Lock()
+    release = threading.Event()
 
     def _work(run: tev.Run, index: int) -> None:
         with lock: started.append(index)
-        _sleep(run, 0.3)
+        while not release.wait(0.01) and not run.cancelled(): pass
 
     evaluator = tev.Evaluator(workers)
     _install(evaluator, [
@@ -1482,11 +1486,11 @@ def _evaluator_stop_starts_nothing(workers: int, factor: int) -> bool:
     ])
     runner = Thread(target = evaluator.start, daemon = True)
     runner.start()
-    if not _wait_for(lambda: len(started) != 0, 5.0): return False
-    time.sleep(0.05)
+    busy = _wait_for(lambda: len(started) == workers, 5.0)
     evaluator.stop()
+    release.set()
     runner.join(timeout = 10)
-    return not runner.is_alive() and len(started) <= workers
+    return busy and not runner.is_alive() and len(started) == workers
 
 
 @prop('Stopping the evaluator before it starts ends it at once', attempts=_attempts(5))
