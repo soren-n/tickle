@@ -2789,6 +2789,50 @@ def _watcher_no_deadlock() -> bool:
     return True
 
 
+@prop('A failure handling one file event leaves the watcher handling the next', attempts=_attempts(5))
+def _watcher_survives_failure() -> bool:
+    """Events are handled on the watcher's own thread; an exception there
+    must not end it, or every later change would go unnoticed."""
+    import tickle.watch as twatch
+    from watchdog.events import FileModifiedEvent
+    test_path = _fixture_path()
+    path = test_path / 'a.txt'
+    path.write_text('a')
+
+    class _Quiet:
+        def schedule(self, handler, path, **kwargs): return object()
+        def unschedule(self, watch): pass
+        def start(self): pass
+        def stop(self): pass
+        def join(self): pass
+
+    events: list[str] = []
+    real_observer = twatch.Observer
+    twatch.Observer = _Quiet  # type: ignore
+    watcher = twatch.FileWatcher()
+    real_handle = watcher.handle
+    failed = [False]
+
+    def _handle(event):
+        if not failed[0]:
+            failed[0] = True
+            raise RuntimeError('a bug while handling an event')
+        real_handle(event)
+
+    watcher.handle = _handle  # type: ignore
+    try:
+        watcher.subscribe(path, lambda event: events.append(event.value))
+        watcher.start()
+        with _quiet():
+            watcher.on_any_event(FileModifiedEvent(str(path)))
+            watcher.on_any_event(FileModifiedEvent(str(path)))
+            ok = _wait_for(lambda: events == ['Modified'], 5.0)
+    finally:
+        watcher.stop()
+        twatch.Observer = real_observer
+    return ok and failed[0]
+
+
 def _inotify_count() -> int | None:
     """The inotify instances this process holds, where /proc shows them."""
     fd_dir = Path('/proc/self/fd')
@@ -2833,6 +2877,8 @@ def _agenda_evaluate_watchers_released(agenda: ta.Agenda, workers: int) -> bool:
     finally:
         twatch.Observer = real_observer
     if not all(observer.stopped_event.is_set() for observer in made): return False
+    # Nor the thread that handles a watcher's events
+    if any(thread.name == 'tickle-watcher' for thread in threading.enumerate()): return False
     if not all(not observer.is_alive() for observer in made): return False
     after = _inotify_count()
     return before is None or after == before
@@ -3370,6 +3416,7 @@ spec = conj(
     _watcher_keeps_modified_folder,
     _watcher_renew_fails,
     _watcher_no_deadlock,
+    _watcher_survives_failure,
     _agenda_evaluate_watchers_released,
     _agenda_evaluate_offline_folder_output,
     _agenda_evaluate_offline_folder_input,
