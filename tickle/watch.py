@@ -1,6 +1,7 @@
 # External module dependencies
 from collections.abc import Callable
-from threading import RLock
+from threading import RLock, Thread
+from queue import SimpleQueue
 from pathlib import Path
 from enum import Enum
 
@@ -64,12 +65,21 @@ class FileWatcher(FileSystemEventHandler):
     The observer exists only from start() to stop(): on Linux an observer
     takes an inotify instance and a thread as soon as it is made, and
     gives them back only when it is started and stopped, so a watcher that
-    is never started must not make one."""
+    is never started must not make one.
+
+    Watchdog calls the handler holding its observer's lock, and scheduling
+    or unscheduling a watch takes that lock too; the watcher takes its own
+    lock first when it changes watches, as subscribe() does on any thread.
+    So the handler only queues the event, and a thread of the watcher
+    handles it and calls the callbacks, or the two threads could each wait
+    for the lock the other holds."""
 
     def __init__(self):
         super().__init__()
         self._lock = RLock()
         self._observer : BaseObserver | None = None
+        self._events : SimpleQueue[FileSystemEvent | None] | None = None
+        self._handler : Thread | None = None
         self._subscriptions : dict[Path, _Subscription] = {}
         self._watch_objs : dict[Watch, ObservedWatch] = {}
         self._watch_count : dict[Watch, int] = {}
@@ -90,18 +100,15 @@ class FileWatcher(FileSystemEventHandler):
             self, str(dir_path), recursive = recursive
         )
 
-    def _replaced(self, watch : Watch, kind : Event, above : bool) -> bool:
+    def _replaced(self, watch : Watch, kind : Event) -> bool:
         # Whether a folder event may have replaced the watched folder. A
         # folder is reported as modified whenever a file in it changes (on
-        # its own watch on Linux, on its parent's on Windows); watching it
-        # again each time could lose the events of the old watch, such as
-        # that file's deletion. So a modification of the watched folder
-        # itself renews the watch only when the folder is another one now.
-        # A modification above it may be the folder being created again,
-        # and renewing then also replaces a new watch that watchdog joined
-        # to the dead one of the folder that went away, which it may not
-        # have dropped yet.
-        if kind != Event.Modified or above: return True
+        # its own watch on Linux, on its parent's on Windows), and so is the
+        # project folder whenever the cache is written; watching again each
+        # time could lose the events of the old watch, such as a file's
+        # deletion. So a modification renews the watch only when the folder
+        # is another one now.
+        if kind != Event.Modified: return True
         return _identity(watch[0]) != self._watch_ids.get(watch)
 
     def _unschedule(self, watch : Watch):
@@ -165,12 +172,14 @@ class FileWatcher(FileSystemEventHandler):
             for path, subscription in list(self._subscriptions.items()):
                 watch = self._anchor(path, subscription.tree)
                 dir_path = subscription.watch[0]
-                above = any(event_path in dir_path.parents for event_path in paths)
-                touched = above or any(event_path == dir_path for event_path in paths)
+                touched = any(
+                    event_path == dir_path or event_path in dir_path.parents
+                    for event_path in paths
+                )
                 if watch == subscription.watch and not touched: continue
                 if watch != subscription.watch:
                     self._move(subscription, watch)
-                elif watch not in refreshed and self._replaced(watch, kind, above):
+                elif watch not in refreshed and self._replaced(watch, kind):
                     refreshed.add(watch)
                     self._refresh(watch)
                 result.append((
@@ -211,6 +220,13 @@ class FileWatcher(FileSystemEventHandler):
     def start(self):
         with self._lock:
             assert self._observer is None
+            events : SimpleQueue[FileSystemEvent | None] = SimpleQueue()
+            self._events = events
+            self._handler = Thread(
+                target = self._handle_events, args = (events,),
+                name = 'tickle-watcher', daemon = True
+            )
+            self._handler.start()
             self._observer = Observer()
             for watch in self._watch_count: self._schedule(watch)
             self._observer.start()
@@ -218,12 +234,29 @@ class FileWatcher(FileSystemEventHandler):
     def stop(self):
         with self._lock:
             observer = self._observer
+            events = self._events
+            handler = self._handler
             self._observer = None
+            self._events = None
+            self._handler = None
             self._watch_objs.clear()
             self._watch_ids.clear()
-        if observer is None: return
-        observer.stop()
-        observer.join()
+        if observer is not None:
+            observer.stop()
+            observer.join()
+        if events is not None and handler is not None:
+            events.put(None)
+            handler.join()
+
+    def _handle_events(self, events : SimpleQueue[FileSystemEvent | None]):
+        while True:
+            event = events.get()
+            if event is None: return
+            try: self.handle(event)
+            except Exception as error:
+                log.error('Failed handling a file event: %s: %s' % (
+                    type(error).__name__, error
+                ))
 
     def _callbacks_for(self, path : Path) -> list[EventHandler]:
         # The file's own subscription, and those of trees holding it
@@ -238,6 +271,14 @@ class FileWatcher(FileSystemEventHandler):
             return result
 
     def on_any_event(self, event : FileSystemEvent):
+        # On the observer thread, holding the observer's lock; see the class
+        # description
+        events = self._events
+        if events is not None: events.put(event)
+
+    def handle(self, event : FileSystemEvent):
+        """Handle one event: move watches as folders come and go, and call
+        the callbacks of the files it concerns."""
         kind = {
             'created': Event.Created,
             'modified': Event.Modified,
@@ -265,7 +306,7 @@ class FileWatcher(FileSystemEventHandler):
         for callback, callback_kind in calls:
             if any(callback is other for other in seen): continue
             seen.append(callback)
-            # A failing callback must not stop the observer thread, which
+            # A failing callback must not stop the watcher's thread, which
             # would end all watching
             try: callback(callback_kind)
             except Exception as error:

@@ -6,6 +6,7 @@ import gc
 import importlib.util
 from pathlib import Path
 from threading import Lock, Thread
+import threading
 import io
 import os
 import pickle
@@ -2616,10 +2617,10 @@ def _watcher_folder_gone(how: str) -> bool:
     watcher.subscribe(folder / 'file.txt', lambda event: events.append(event.value))
     if how == 'deleted':
         shutil.rmtree(folder)
-        watcher.on_any_event(DirDeletedEvent(str(folder)))
+        watcher.handle(DirDeletedEvent(str(folder)))
     else:
         os.rename(folder, test_path / 'other')
-        watcher.on_any_event(DirMovedEvent(str(folder), str(test_path / 'other')))
+        watcher.handle(DirMovedEvent(str(folder), str(test_path / 'other')))
     watcher.stop()
     return events == ['Deleted']
 
@@ -2629,8 +2630,8 @@ def _watcher_keeps_modified_folder() -> bool:
     """A folder is reported as modified whenever a file in it changes;
     watching the folder again each time could lose the events of the old
     watch, such as that file's deletion. A folder replaced by another must
-    still be watched again, and so must a folder whose parent is reported
-    as modified, which may be the folder being created again."""
+    still be watched again. A modification above it, such as the cache
+    being written in the project folder, leaves it alone too."""
     import tickle.watch as twatch
     from watchdog.events import DirModifiedEvent
     test_path = _fixture_path()
@@ -2658,19 +2659,19 @@ def _watcher_keeps_modified_folder() -> bool:
         watcher.start()
         scheduled.clear()
         for _ in range(3):
-            watcher.on_any_event(DirModifiedEvent(str(folder)))
+            watcher.handle(DirModifiedEvent(str(folder)))
         if scheduled != []: return False
         other = test_path / 'other'
         other.mkdir()
         shutil.rmtree(folder)
         os.rename(other, folder)
-        watcher.on_any_event(DirModifiedEvent(str(folder)))
+        watcher.handle(DirModifiedEvent(str(folder)))
         if scheduled != [str(folder)]: return False
 
-        # A modification above the folder may be it being created again
+        # Nor does a modification above it, such as the cache being written
         scheduled.clear()
-        watcher.on_any_event(DirModifiedEvent(str(test_path)))
-        return scheduled == [str(folder)]
+        watcher.handle(DirModifiedEvent(str(test_path)))
+        return scheduled == []
     finally:
         watcher.stop()
         twatch.Observer = real_observer
@@ -2715,11 +2716,77 @@ def _watcher_renew_fails() -> bool:
         watcher.start()
 
         # Handled while the folder still exists, so its watch is renewed
-        watcher.on_any_event(DirDeletedEvent(str(folder)))
+        watcher.handle(DirDeletedEvent(str(folder)))
     finally:
         watcher.stop()
         twatch.Observer = real_observer
     return scheduled == [str(folder), str(test_path)] and events == ['Deleted']
+
+
+@prop('Subscribing while the observer delivers folder events never deadlocks', attempts=_attempts(5))
+def _watcher_no_deadlock() -> bool:
+    """Watchdog holds its observer's lock while it calls the handler, and
+    online mode subscribes and unsubscribes from other threads while events
+    arrive; the watcher must never wait for the observer's lock while
+    holding its own, which the handler waits for. The stand-in observer
+    takes one lock around both scheduling and dispatching, as watchdog's
+    does."""
+    import tickle.watch as twatch
+    from watchdog.events import DirModifiedEvent
+    test_path = _fixture_path()
+    folder = test_path / 'src'
+    folder.mkdir()
+    observer_lock = threading.RLock()
+    observers: list = []
+
+    class _Locking:
+        def __init__(self):
+            observers.append(self)
+        def schedule(self, handler, path, **kwargs):
+            with observer_lock:
+                time.sleep(0.0005)
+                return object()
+        def unschedule(self, watch):
+            with observer_lock: pass
+        def dispatch(self, handler, event):
+            with observer_lock: handler.on_any_event(event)
+        def start(self): pass
+        def stop(self): pass
+        def join(self): pass
+
+    real_observer = twatch.Observer
+    twatch.Observer = _Locking  # type: ignore
+    watcher = twatch.FileWatcher()
+    try:
+        watcher.subscribe(folder / 'a.txt', lambda event: None)
+        watcher.start()
+        done = threading.Event()
+
+        def _deliver():
+            while not done.is_set():
+                observers[0].dispatch(watcher, DirModifiedEvent(str(folder)))
+                time.sleep(0.0002)
+
+        # Files in folders of their own, so each one schedules a watch
+        for index in range(20): (folder / str(index)).mkdir()
+
+        def _subscribe():
+            for index in range(300):
+                path = folder / str(index % 20) / 'file.txt'
+                watcher.subscribe(path, lambda event: None)
+                watcher.unsubscribe(path)
+            done.set()
+
+        threads = [Thread(target = _deliver, daemon = True), Thread(target = _subscribe, daemon = True)]
+        for thread in threads: thread.start()
+        for thread in threads: thread.join(timeout = 10)
+        stuck = any(thread.is_alive() for thread in threads)
+        done.set()
+    finally:
+        twatch.Observer = real_observer
+    if stuck: return False
+    watcher.stop()
+    return True
 
 
 def _inotify_count() -> int | None:
@@ -3302,6 +3369,7 @@ spec = conj(
     _watcher_folder_gone,
     _watcher_keeps_modified_folder,
     _watcher_renew_fails,
+    _watcher_no_deadlock,
     _agenda_evaluate_watchers_released,
     _agenda_evaluate_offline_folder_output,
     _agenda_evaluate_offline_folder_input,
